@@ -1,0 +1,67 @@
+/* CSS files add styling rules to your content */
+
+body {
+  margin: 2em;
+  font-family: aktiv-grotesk-thin, sans-serif;
+
+  font-weight: 200;
+ line-height: 1.6;
+  font-style: italic;
+}
+
+h1 {
+  color: #373fff;
+  font-family: aktiv-grotesk, sans-serif;
+  font-weight: 700;
+  font-style: normal;
+}
+
+h3 {
+  font-family: aktiv-grotesk-thin, sans-serif;
+
+font-weight: 200;
+
+font-style: normal;
+}
+.container {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.token {
+ 
+  max-height: 250px;
+}
+
+.asset {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 20px;
+}
+
+.myButton {
+	box-shadow: 0px 10px 14px -7px #c6e2e6;
+	background:linear-gradient(to bottom, #007fad 5%, #9c009c 100%);
+	background-color:#007fad;
+	border-radius:27px;
+	display:inline-block;
+	cursor:pointer;
+	color:#ffffff;
+	font-family:Trebuchet MS;
+	font-size:20px;
+	font-weight:bold;
+	padding:13px 32px;
+	text-decoration:none;
+	text-shadow:0px 1px 0px #3d768a;
+}
+.myButton:hover {
+	background:linear-gradient(to bottom, #9c009c 5%, #007fad 100%);
+	background-color:#9c009c;
+}
+.myButton:active {
+	position:relative;
+	top:1px;
+}
+
+        

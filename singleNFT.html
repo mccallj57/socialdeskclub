@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Hello!</title>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- import the webpage's stylesheet -->
+    <link rel="stylesheet" href="/style.css" />
+
+    <!-- import the webpage's javascript file -->
+    <script src="/script.js" defer></script>
+  </head>
+  <body>
+    <h1>Single NFT</h1>
+
+    <!-- This is the method instance, which sets up the NFT functionality -->
+    <!-- This page is linked to the previous by the URL bar, by using $URL we can get these configuration from the URL bar dynamically -->
+    <div
+      data-dh-feature="nft"
+      data-dh-property-tag-id="001"
+      data-dh-property-asset-token-id="$URL"
+      data-dh-property-asset-contract-address="$URL"
+    >
+      <!-- This is the container, linked to the above 'method instance' via the 'property-tag-id'-->
+      <div
+        data-dh-property-tag-id="001"
+        data-dh-property-asset-item="true"
+        class="asset"
+      >
+        <!-- We can get the ImageURL and Name of the collectible from the JSON object that represents the collectible. In this case the data is from the OpenSea API
+        and the name and image url are standardized as 'image_url' and 'name'-->
+        <img data-dh-property-asset-json-path="image_url" />
+        <h2 data-dh-property-asset-json-path="name"></h2>
+        <h3>
+          <!-- Here you are able to 'dot into' any property on the collectible tokens JSON metadata. This is metadata as defined by the OpenSea API -->
+          Owner: <span data-dh-property-asset-json-path="owner.address"></span>
+        </h3>
+      </div>
+    </div>
+
+    <!-- include the Glitch button to show what the webpage is about and
+          to make it easier for folks to view source and remix -->
+    <div class="glitchButton" style="position:fixed;top:20px;right:20px;"></div>
+    <script
+      src="https://package.dapphero.io/main.js"
+      id="dh-apiKey"
+      data-api="1589032410701x116022831009497090"
+    ></script>
+    
+    
+    <!-- Google Analytics script to track if people find this tutorial useufl -->
+    <!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-156455865-3"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-156455865-3');
+</script>
+  </body>
+</html>

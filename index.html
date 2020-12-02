@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Hello!</title>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- import the webpage's stylesheet -->
+    <link rel="stylesheet" href="/style.css" />
+
+    <!-- import the webpage's fonts file -->
+    <link rel="stylesheet" href="https://use.typekit.net/uxx6oco.css" />
+  </head>
+  <body>
+    <h1>Preview of DappHero Collectible Functionality for Gamma NFT contract</h1>
+
+    <p>
+      This page demonstrates the NFT's created to date using the light weight code from Ross Campbell. <br />
+      To build your own NFT we will link to front end <a href="gamma.html">Gamma NFT<br />
+    </p>
+
+    <!-- These buttons allow you to page through results -->
+    <button class="myButton"
+      data-dh-property-pagination-prev="true"
+      data-dh-property-tag-id="000"
+    >
+      Previous
+    </button>
+    <button class="myButton"
+      data-dh-property-pagination-next="true"
+      data-dh-property-tag-id="000"
+    >
+      Next
+    </button>
+    
+    <!-- This is the method instance, the "parent" of the NFT object -->
+    <!-- Replace 'property-asset-contract-address' with the NFT collectible contract address of your choice.  -->
+    <!-- The address "0xeF0ff94B152C00ED4620b149eE934f2F4A526387" is the Gamma NFT contract address. -->
+    
+    <div
+      data-dh-feature="nft"
+      data-dh-property-tag-id="000"
+      data-dh-property-asset-contract-address="0xeF0ff94B152C00ED4620b149eE934f2F4A526387" 
+      data-dh-property-pagination-limit="30"
+      data-dh-property-pagination-offset="01"
+      class="container"
+    >
+      <!-- This is the container, it is linked by the "property-tag-id" to the method instance, and will display the NFT Inside -->
+      <!-- This is also the item that will be repeated as many times as there are NFTS to display-->
+      <div
+        data-dh-property-tag-id="000"
+        data-dh-property-asset-item="true"
+        class="asset"
+      >
+        <a
+          href="./singleNFT.html?assetTokenId=$THIS_TokenID&assetContractAddress=0xeF0ff94B152C00ED4620b149eE934f2F4A526387"
+          ><img data-dh-property-asset-json-path="image_url" class="token"
+        /></a>
+        <h3 data-dh-property-asset-json-path="name"></h3>
+      </div>
+    </div>
+    
+
+    <!-- include the Glitch button to show what the webpage is about and
+          to make it easier for folks to view source and remix -->
+    <div class="glitchButton" style="position:fixed;top:20px;right:20px;"></div>
+    
+    <!-- Imporant: This demo is using a pre-release script, so please change the DappHero tag: "main.js" to the nightly build "main-05-09-2020.js" for the latest features -->
+    <script
+      src="https://package.dapphero.io/main-05-09-2020.js"
+      id="dh-apiKey"
+      data-api="1589210594970x768903940597874700"
+    ></script>
+     <p>
+      This page is powered via DappHero. We're using the nightly build of the
+      DappHero Script.<br />
+      To build your own NFT project, copy this Glitch and replace it with your
+      own Script Tag from <a href="https://www.dapphero.io">DappHero.io</a>.
+      <br />Documentation can be found at
+      <a href="https://docs.dapphero.io">docs.dapphero.io</a>.<br />
+    </p>
+   
+  </body>
+</html>
