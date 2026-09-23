@@ -158,9 +158,19 @@ function App(){
   }
   async function login(e){
     e.preventDefault();await attempt(async()=>{
-      const response=await fetch(cfg.authBase+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
-      const out=await response.json();if(!response.ok||!out.token)throw new Error(out.detail||out.error||"Sign-in failed.");
-      setToken(out.token);await refresh();setUser(out.user);setPassword("");notice("Welcome back to your writing desk.");
+      // Call Writes API (CORS OK). Lambda proxies to Reads server-side — avoids browser "Failed to fetch" on authBase.
+      const out=await api("/auth/login","POST",{username:username.trim(),password});
+      if(!out?.token)throw new Error("Sign-in did not return a session token.");
+      setToken(out.token);
+      try{
+        await refresh();
+      }catch(err){
+        setToken("");
+        throw new Error("Signed in, but Writes could not open your library ("+(err.message||"unauthorized")+").");
+      }
+      const u=out.user||{};
+      setUser({username:u.username||username.trim(),display_name:u.display_name||u.displayName||u.username||username.trim()});
+      setPassword("");notice("Welcome back to your writing desk.");
     });
   }
   const filtered=works.filter(w=>(filter==="archived"?w.archived:!w.archived)&&(filter==="all"||filter==="archived"||filter==="sources"||(filter==="shared"?w.shared:w.kind===filter))&&(w.title+" "+w.author+" "+w.collection).toLowerCase().includes(query.toLowerCase())).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
