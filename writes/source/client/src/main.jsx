@@ -1,0 +1,264 @@
+import React, { useState, useEffect, useRef } from "react";
+import { createRoot } from "react-dom/client";
+import { BookOpen, Feather, Library, Plus, ArrowUpRight, ArrowLeft, ArrowRight, Download, Upload, Search, X, Sun, Moon, Lock, Check, Archive, History, Link2, FileText, AlignLeft, ExternalLink, RefreshCw, Bookmark, PanelLeftClose, Scissors, CircleHelp } from "lucide-react";
+import JSZip from "jszip";
+import { DEFAULT_LAYOUT, bookPages, stanzaParts } from "../../shared/poetry.mjs";
+import { LayoutControls, VerseArranger, VerseText } from "./PoetryTools.jsx";
+import "./style.css";
+import "./poetry.css";
+
+const cfg = window.WRITES_CONFIG || {};
+const BASE = (cfg.apiBase || "").startsWith("__PORT_") ? "" : (cfg.apiBase || "").replace(/\/$/,"");
+const SESSION_KEY = "sdc-writes-session";
+const THEME_KEY = "sdc-writes-theme";
+const LIBRARY_LIMIT = 500;
+let TOKEN = "";
+try { TOKEN = sessionStorage.getItem(SESSION_KEY) || ""; } catch { /* private browsing */ }
+function setToken(token) {
+  TOKEN = token || "";
+  try {
+    if (TOKEN) sessionStorage.setItem(SESSION_KEY, TOKEN);
+    else sessionStorage.removeItem(SESSION_KEY);
+  } catch { /* ignore quota / private mode */ }
+}
+async function api(path, method = "GET", data) {
+  const r = await fetch(BASE + "/api" + path, { method, headers:{"Content-Type":"application/json",...(TOKEN?{Authorization:"Bearer "+TOKEN}:{})}, ...(data===undefined?{}:{body:JSON.stringify(data)}) });
+  const out = await r.json().catch(()=>({error:"The server did not return a readable response."}));
+  if(!r.ok) {
+    if (r.status === 401 && cfg.mode === "production") setToken("");
+    throw new Error(out.error || "The request could not be completed.");
+  }
+  return out;
+}
+const emptyWork = () => ({title:"",author:"",body:"",kind:"poetry",collection:"",theme:"forest",archived:false,layout:{...DEFAULT_LAYOUT},versionName:""});
+const kinds = {poetry:"Poetry",story:"Stories",essay:"Essays",other:"Other writing"};
+const countWords = text => text.trim().split(/\s+/).filter(Boolean).length;
+const dateLabel = date => new Date(date).toLocaleDateString(undefined,{month:"short",day:"numeric"});
+const esc = s => String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,65)||"untitled";
+function Logo(){return <svg aria-label="Writes pen mark" width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M8 25 10 13 23 5 27 9 19 22 8 25Z" stroke="currentColor" strokeWidth="1.5"/><path d="M8 25 17 16M12 11l9 9M5 28h21" stroke="currentColor" strokeWidth="1.5"/><circle cx="18" cy="15" r="2" stroke="currentColor" strokeWidth="1.5"/></svg>}
+function Button({children,icon:Icon,variant="",...props}){return <button className={"button "+variant} {...props}>{Icon&&<Icon size={17}/>}<span>{children}</span></button>}
+function Modal({title,children,onClose,wide=false}){
+  const ref=useRef(null);
+  useEffect(()=>{ref.current.showModal();return()=>ref.current?.close();},[]);
+  return <dialog className={wide?"wide":""} ref={ref} onCancel={e=>{e.preventDefault();onClose();}} onClick={e=>{if(e.target===ref.current)onClose();}}>
+    <div className="modal-head"><h2>{title}</h2><button className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={21}/></button></div>{children}
+  </dialog>;
+}
+function App(){
+  const [user,setUser]=useState(null),[loading,setLoading]=useState(true),[error,setError]=useState(""),[toast,setToast]=useState("");
+  const [works,setWorks]=useState([]),[sources,setSources]=useState([]),[filter,setFilter]=useState("all"),[query,setQuery]=useState("");
+  const [view,setView]=useState("library"),[work,setWork]=useState(null),[saved,setSaved]=useState(""),[busy,setBusy]=useState(false);
+  const [modal,setModal]=useState(""),[reader,setReader]=useState(null),[returnView,setReturnView]=useState("library");
+  const [history,setHistory]=useState([]),[shareUrl,setShareUrl]=useState(""),[theme,setTheme]=useState(()=>{
+    try{const savedTheme=localStorage.getItem(THEME_KEY);if(savedTheme==="light"||savedTheme==="dark")return savedTheme;}catch{/* ignore */}
+    return matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";
+  });
+  const [username,setUsername]=useState(""),[password,setPassword]=useState("");
+  const [versionName,setVersionName]=useState("");
+  const [apiReady,setApiReady]=useState(cfg.mode!=="production");
+  const bodyRef=useRef(null);
+  const dirty=!!work&&JSON.stringify(work)!==saved;
+  function notice(s){setToast(s);setTimeout(()=>setToast(""),4500);}
+  async function attempt(fn){setError("");setBusy(true);try{return await fn();}catch(e){setError(e.message);return null;}finally{setBusy(false);}}
+  async function refresh(){const [a,b]=await Promise.all([api("/works"),api("/sources")]);setWorks(a.works);setSources(b.sources);}
+  function signOut(){
+    if(dirty&&!window.confirm("Sign out and discard unsaved changes? Your last saved version will remain."))return;
+    setToken("");setUser(null);setWorks([]);setSources([]);setWork(null);setSaved("");setView("library");setReader(null);setModal("");setError("");notice("Signed out of Writes.");
+  }
+  async function boot(){
+    try{
+      const token=new URLSearchParams(location.hash.slice(1)).get("share");
+      if(token){setReader((await api("/public/"+encodeURIComponent(token))).work);setView("public");setLoading(false);return;}
+      if(cfg.mode==="production"){
+        try{
+          const health=await fetch(BASE+"/api/health",{headers:{"Accept":"application/json"}}).then(r=>r.ok?r.json():null).catch(()=>null);
+          setApiReady(!!(health&&health.ok&&health.mode==="production"));
+        }catch{setApiReady(false);}
+        if(TOKEN){
+          try{
+            const data=await api("/bootstrap");
+            setUser(data.user);await refresh();
+          }catch{
+            setToken("");setUser(null);
+          }
+        }
+        setLoading(false);return;
+      }
+      const data=await api("/bootstrap");setToken(data.token);setUser(data.user);await refresh();
+    }catch(e){setError(e.message);}finally{setLoading(false);}
+  }
+  useEffect(()=>{boot();const onHash=()=>boot();window.addEventListener("hashchange",onHash);return()=>window.removeEventListener("hashchange",onHash);},[]);
+  useEffect(()=>{document.documentElement.dataset.theme=theme;try{localStorage.setItem(THEME_KEY,theme);}catch{/* ignore */}},[theme]);
+  useEffect(()=>{const fn=e=>{if(dirty){e.preventDefault();e.returnValue="";}};window.addEventListener("beforeunload",fn);return()=>window.removeEventListener("beforeunload",fn);},[dirty]);
+  const abandon=()=>!dirty||window.confirm("Discard these unsaved changes? Your last saved version will remain.");
+  function library(next="all"){if(!abandon())return;setWork(null);setView("library");setFilter(next);setQuery("");}
+  function newWork(){if(!abandon())return;const w=emptyWork();setWork(w);setSaved(JSON.stringify(w));setView("editor");}
+  async function edit(id){if(!abandon())return;await attempt(async()=>{const {work:w}=await api("/works/"+id);setWork(w);setSaved(JSON.stringify(w));setView("editor");});}
+  function change(field,value){setWork(w=>({...w,[field]:value}));}
+  async function save(label=""){
+    return attempt(async()=>{
+      const {work:w}=await api(work.id?"/works/"+work.id:"/works",work.id?"PUT":"POST",{...work,versionName:typeof label==="string"?label:""});
+      setWork(w);setSaved(JSON.stringify(w));await refresh();notice("Saved to your private library.");return w;
+    });
+  }
+  async function preview(w,from){
+    if(!w.id&&from==="editor"&&!w.title.trim()){setError("Give your writing a title before opening the book.");return;}
+    setReader(w);setReturnView(from);setView("reader");
+  }
+  async function cardPreview(id){await attempt(async()=>{const {work:w}=await api("/works/"+id);preview(w,"library");});}
+  async function showHistory(){if(!work.id)return;await attempt(async()=>{const out=await api("/works/"+work.id+"/history"),current=(await api("/works/"+work.id)).work;setHistory([current,...out.history,...(out.namedVersions||[])].sort((a,b)=>b.version-a.version));setModal("history");});}
+  async function loadVersion(h){
+    if(dirty&&!confirm("Replace these unsaved changes with this saved version?"))return;
+    await attempt(async()=>{
+      const r=h.body===undefined?(await api("/works/"+work.id+"/revisions/"+h.version)).revision:h;
+      setWork(w=>({...w,title:r.title,author:r.author,body:r.body,kind:r.kind,collection:r.collection,theme:r.theme,layout:r.layout||{...DEFAULT_LAYOUT},versionName:""}));
+      setModal("");notice("Version loaded as an unsaved draft. Review it, then save.");
+    });
+  }
+  async function alternate(body,suffix){
+    await attempt(async()=>{
+      const fields={...work,body,title:((work.title||"Untitled")+" · "+suffix).slice(0,180),versionName:suffix,archived:false};
+      const {work:w}=await api(work.id?"/works/"+work.id+"/fork":"/works","POST",fields);
+      setWork(w);setSaved(JSON.stringify(w));setModal("");await refresh();notice("Separate alternate saved. The original writing is unchanged.");
+    });
+  }
+  async function exportWorks(ids){
+    await attempt(async()=>{
+      const zip=new JSZip(), all=[];
+      for(const id of ids){
+        const data=await api("/works/"+id+"/export"),w=data.work;all.push(w);
+        const folder=zip.folder(slug(w.title)+"-"+w.id.slice(-8));
+        folder.file("writing.txt",w.body);folder.file("writing.md","# "+w.title+"\n\n"+w.body);
+        folder.file("writing.json",JSON.stringify(w,null,2));
+        const l={...DEFAULT_LAYOUT,...w.layout};
+        folder.file("read.html",`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(w.title)}</title><style>body{max-width:44rem;margin:4rem auto;padding:1.5rem;font:18px/1.8 Georgia,serif;color:#243a30;background:#faf8f1}h1{line-height:1.2}pre{font:inherit;line-height:${l.lineHeight};text-align:${l.align};white-space:pre-wrap;overflow-wrap:anywhere;tab-size:4;margin:0}.stanzas{display:grid;gap:${l.stanzaGap==="airy"?"2.5em":".8em"}}hr{margin:3rem 0}</style><h1>${esc(w.title)}</h1><p>${esc(w.author)}</p>${bookPages(w.body,l).map(p=>l.stanzaGap==="original"?`<pre>${esc(p)}</pre>`:`<div class="stanzas">${stanzaParts(p).blocks.map(b=>`<pre>${esc(b)}</pre>`).join("")}</div>`).join("<hr>")}</html>`);
+        if(w.source)folder.file("originals/source.txt",w.source.original);
+        for(const item of data.revisions){const {revision}=await api("/works/"+id+"/revisions/"+item.version);folder.file("revisions/"+item.version+".json",JSON.stringify(revision,null,2));}
+      }
+      zip.file("writes-library.json",JSON.stringify({format:"socialdeskclub-writes",schemaVersion:1,exportedAt:new Date().toISOString(),works:all},null,2));
+      zip.file("README.txt","Your writing belongs to you.\n\nwrites-library.json can be re-imported into Writes. Each folder contains plain text, Markdown, self-contained readable HTML, structured JSON, saved revisions, and original source text when available.\n\n[[page]] on its own line marks an intentional book page break. No text has been rewritten. Images and other media are not archived by this text-first release.\n\nKeep this archive somewhere you control.\n");
+      const blob=await zip.generateAsync({type:"blob"}),url=URL.createObjectURL(blob),a=document.createElement("a");
+      a.href=url;a.download=ids.length===1?slug(all[0].title)+".zip":"writes-library.zip";a.click();setTimeout(()=>URL.revokeObjectURL(url),15000);notice("Your portable archive is ready.");
+    });
+  }
+  async function toggleArchive(){
+    if(dirty&&!window.confirm("Save your current changes and "+(work.archived?"restore":"archive")+" this writing?"))return;
+    await attempt(async()=>{const {work:w}=await api("/works/"+work.id,"PUT",{...work,archived:!work.archived});setWork(w);setSaved(JSON.stringify(w));await refresh();notice(w.archived?"Archived. It is still included in library exports.":"Restored to your library.");});
+  }
+  async function share(){
+    if(dirty){setError("Save your changes before reviewing a shareable snapshot.");return;}
+    setShareUrl(work.shareToken?location.href.split("#")[0]+"#share="+work.shareToken:"");setModal("share");
+  }
+  async function publish(){
+    await attempt(async()=>{const out=await api("/works/"+work.id+"/share","POST",{confirm:true});setWork(out.work);setSaved(JSON.stringify(out.work));setShareUrl(location.href.split("#")[0]+"#share="+out.token);await refresh();notice("Snapshot created. Future draft edits stay private.");});
+  }
+  async function revoke(){
+    await attempt(async()=>{const out=await api("/works/"+work.id+"/share","DELETE");setWork(out.work);setSaved(JSON.stringify(out.work));setShareUrl("");await refresh();notice("Snapshot link revoked.");});
+  }
+  async function login(e){
+    e.preventDefault();await attempt(async()=>{
+      const response=await fetch(cfg.authBase+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
+      const out=await response.json();if(!response.ok||!out.token)throw new Error(out.detail||out.error||"Sign-in failed.");
+      setToken(out.token);await refresh();setUser(out.user);setPassword("");notice("Welcome back to your writing desk.");
+    });
+  }
+  const filtered=works.filter(w=>(filter==="archived"?w.archived:!w.archived)&&(filter==="all"||filter==="archived"||filter==="sources"||(filter==="shared"?w.shared:w.kind===filter))&&(w.title+" "+w.author+" "+w.collection).toLowerCase().includes(query.toLowerCase())).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
+  const nav=[["all","My library",Library],["poetry","Poetry",Feather],["story","Stories",BookOpen],["essay","Essays",FileText],["other","Other writing",Bookmark],["sources","Imports",Upload],["shared","Shared snapshots",Link2],["archived","Archived",Archive]];
+  const activeCount=works.filter(w=>!w.archived).length;
+  return <><a className="skip-link" href="#writes-main">Skip to content</a><header className="topbar">
+    <a className="brand" href="https://socialdeskclub.com/" target="_blank" rel="noreferrer"><Logo/><span>Social Desk Club</span></a>
+    <nav className="site-nav" aria-label="Social Desk Club"><a href="https://socialdeskclub.com/reads/" target="_blank" rel="noreferrer">Reads <ArrowUpRight size={13}/></a><button className="active" onClick={()=>library()}>Writes</button><a href="https://socialdeskclub.com/camp/" target="_blank" rel="noreferrer">Camp <ArrowUpRight size={13}/></a></nav>
+    <div className="header-right"><span className="preview-tag">{cfg.mode==="production"?"MEMBER DESK":"WORKING PREVIEW"}</span>{user&&<button className="sign-out" onClick={signOut}>Sign out</button>}<button className="icon-button" aria-label={theme==="light"?"Switch to dark mode":"Switch to light mode"} onClick={()=>setTheme(theme==="light"?"dark":"light")}>{theme==="light"?<Moon size={19}/>:<Sun size={19}/>}</button></div>
+  </header>
+  {error&&<div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={()=>setError("")}><X size={18}/></button></div>}
+  {loading?<div className="loading" id="writes-main"><Logo/><p>Opening your writing desk…</p></div>:
+  view==="public"&&reader?<Reader work={reader} publicView onClose={()=>{location.hash="";setReader(null);setView("library");}}/>:
+  !user?<main className="signin" id="writes-main"><Logo/><p className="eyebrow">SOCIAL DESK CLUB · WRITES</p><h1>Your words have a home.</h1><p>Sign in with your existing Reads member account. Your writing library is separate and private.</p>{cfg.mode==="production"&&!apiReady&&<p className="callout" role="status">The Writes desk is still finishing setup. If this persists, ask an administrator to upload the API package.</p>}{cfg.mode==="production"?<form onSubmit={login}><label>Username<input required value={username} onChange={e=>setUsername(e.target.value)} autoComplete="username"/></label><label>Password<input required type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password"/></label><Button variant="primary" disabled={busy||!apiReady}>Sign in to Writes</Button><a href="https://socialdeskclub.com/reads/" target="_blank" rel="noreferrer">Create a member account in Reads</a></form>:<Button icon={RefreshCw} onClick={()=>{setLoading(true);boot();}}>Try opening the desk again</Button>}<p className="fineprint">Writes never changes your Reads password. Snapshots you share are deliberate copies, not live drafts.</p></main>:
+  view==="reader"?<Reader work={reader} onClose={()=>setView(returnView)}/>:
+  <div className={"shell "+(view==="editor"?"editing":"")} id="writes-main">
+    <aside className="sidebar"><div className="desk-label"><span className="avatar"><Feather size={18}/></span><div><strong>Your writing desk</strong><small>{cfg.mode==="production"?(user.display_name||user.username):"A private place to begin"}</small></div></div>
+      <div className="nav-label">YOUR SHELVES</div><nav aria-label="Writing library">{nav.map(([id,label,Icon])=><button key={id} className={view==="library"&&filter===id?"selected":""} onClick={()=>library(id)}><Icon size={18}/><span>{label}</span>{["all","poetry","story","essay"].includes(id)&&<small>{works.filter(w=>!w.archived&&(id==="all"||w.kind===id)).length}</small>}</button>)}</nav>
+      <div className="capacity" aria-live="polite"><span>Library capacity</span><strong>{activeCount} / {LIBRARY_LIMIT}</strong><div className="capacity-bar" role="presentation"><span style={{width:`${Math.min(100,(activeCount/LIBRARY_LIMIT)*100)}%`}}/></div></div>
+      <div className="ownership"><Bookmark size={21}/><strong>Yours, wherever you go.</strong><p>Keep the original. Make something new. Take every word with you.</p><button onClick={()=>setModal("about")}>The Writes promise <ArrowUpRight size={15}/></button></div>
+      <button className="sidebar-export" disabled={busy||!works.length} onClick={()=>exportWorks(works.map(w=>w.id))}><Download size={18}/>Export my library</button>
+    </aside>
+    {view==="library"?<main className="library">
+      <div className="page-heading"><div><p className="eyebrow">WRITES / {filter==="all"?"YOUR LIBRARY":nav.find(n=>n[0]===filter)?.[1].toUpperCase()}</p><h1>{filter==="all"?"A home for your words.":filter==="sources"?"Bring your writing home.":nav.find(n=>n[0]===filter)?.[1]}</h1><p className="lede">{filter==="sources"?"Import from a publication, an export file, or the page in front of you.":"Poems, stories, and things not quite named yet. All in one place."}</p></div><div className="heading-actions"><Button icon={Upload} onClick={()=>setModal("import")}>Import writing</Button><Button icon={Plus} variant="primary" onClick={newWork}>New writing</Button></div></div>
+      {cfg.mode!=="production"&&<div className="preview-note"><span className="status-dot"/>Your own preview workspace. The sample books are examples, not imported member writing.</div>}
+      {filter==="sources"?<section className="sources-panel"><div className="section-label"><h2>Your sources</h2><span>Refresh is always manual</span></div>{sources.length?sources.map(s=><div className="source-row" key={s.id}><div><strong>{new URL(s.url).hostname}</strong><p>{s.url}</p><small>Last import {dateLabel(s.updatedAt)}</small></div><Button icon={RefreshCw} onClick={()=>{setShareUrl(s.url);setModal("import");}}>Review new posts</Button></div>):<div className="empty-state"><Upload size={28}/><h2>No publications connected yet.</h2><p>Add your Medium or Substack feed. You will review the available posts before anything is copied.</p><Button variant="primary" onClick={()=>setModal("import")}>Import your first posts</Button></div>}<p className="fineprint">Feeds may contain only recent posts or excerpts. For a fuller archive, use your platform’s export. Text imports do not archive images or other media.</p></section>:
+      <><div className="library-tools"><div className="section-label"><h2>{filter==="all"?"On your shelf":nav.find(n=>n[0]===filter)?.[1]}</h2><span>{filtered.length} {filtered.length===1?"piece":"pieces"}</span></div><label className="search-field"><Search size={17}/><input aria-label="Find in your library" placeholder="Find a title, author, or collection" value={query} onChange={e=>setQuery(e.target.value)}/>{query&&<button className="icon-button" aria-label="Clear search" onClick={()=>setQuery("")}><X size={16}/></button>}</label></div>
+      <div className="book-grid">{filtered.map((w,i)=><article className="book-card" key={w.id}>
+        <button className={"book-cover "+w.theme} onClick={()=>cardPreview(w.id)} aria-label={"Read "+w.title}><span className="cover-top">{w.kind==="poetry"?"A COLLECTION OF POEMS":w.kind==="story"?"A SHORT STORY":w.kind==="essay"?"NOTES & REFLECTIONS":"COLLECTED WRITING"}</span><span className="cover-rule"/><span className="cover-title">{w.title}</span><span className="cover-author">{w.author||"By you"}</span><span className="cover-bottom"><span>WRITES</span><span>{String(i+1).padStart(2,"0")}</span></span><span className="read-overlay"><BookOpen size={16}/>Open book</span></button>
+        <div className="book-meta"><div><span className="book-type">{kinds[w.kind]}</span><span>{w.example?"Example":w.platform||"Original"}{w.shared?" · Shared":" · Private"}</span></div><button className="edit-link" onClick={()=>edit(w.id)}>Open editor <ArrowUpRight size={15}/></button><div className="book-date">{w.words} words<span>{dateLabel(w.updatedAt)}</span></div></div>
+      </article>)}{filter==="all"&&!query&&<button className="new-book" onClick={newWork}><span className="new-book-icon"><Plus size={28} strokeWidth={1}/></span><strong>The next page<br/>is yours.</strong><span>Start something new <ArrowUpRight size={16}/></span></button>}</div>
+      {!filtered.length&&(query||filter!=="all")&&<div className="empty-state"><BookOpen size={28}/><h2>{query?"No writing matches that search.":"A little room for something new."}</h2><p>{query?"Try a different title, author, or collection.":"Your saved writing will appear on this shelf."}</p><Button onClick={newWork} icon={Plus}>New writing</Button></div>}
+      <div className="library-bottom"><div><span className="eyebrow">FROM ANYWHERE. FOR KEEPS.</span><h2>Your writing shouldn’t live on borrowed time.</h2><p>Bring your posts in from Medium, Substack, or a file. Keep an independent text copy, then make it your own.</p></div><Button icon={ArrowRight} onClick={()=>setModal("import")}>Bring a piece over</Button></div></>}
+      <footer><span><Lock size={13}/>Private until you choose to share</span><span>Made for the words, not the algorithm.</span></footer>
+    </main>:<main className="editor">
+      <div className="editor-top"><Button icon={ArrowLeft} variant="quiet" onClick={()=>library()}>My library</Button><div className="save-state">{dirty?<><span className="unsaved-dot"/>Unsaved changes</>:<><Check size={15}/> {work.id?"Saved":"New draft"}</>}</div><div className="editor-actions"><Button icon={BookOpen} onClick={()=>preview(work,"editor")}>Read as a book</Button><Button variant="primary" disabled={busy||(!dirty&&!!work.id)} onClick={save}>{busy?"Saving…":"Save writing"}</Button></div></div>
+      <div className="editor-layout"><section className="manuscript"><label className="sr-only" htmlFor="work-title">Title</label><input id="work-title" className="title-input" placeholder="Give it a title" maxLength={180} value={work.title} onChange={e=>change("title",e.target.value)}/><label className="author-field"><span>By</span><input aria-label="Author" placeholder="Your name" maxLength={120} value={work.author} onChange={e=>change("author",e.target.value)}/></label>
+        <div className="writing-toolbar"><span><Feather size={15}/>{kinds[work.kind]}</span><button onClick={()=>setModal("arrange")}><AlignLeft size={15}/>Arrange verse</button><button onClick={()=>{const el=bodyRef.current,a=el.selectionStart,b=el.selectionEnd;change("body",work.body.slice(0,a)+"\n\n[[page]]\n\n"+work.body.slice(b));setTimeout(()=>{el.focus();el.setSelectionRange(a+12,a+12);},0);}}><Scissors size={15}/>Page break</button></div>
+        <label className="sr-only" htmlFor="work-body">Manuscript</label><textarea id="work-body" ref={bodyRef} className="body-input" spellCheck placeholder={"Begin here.\n\nA line, a stanza, a very small adventure."} value={work.body} onChange={e=>change("body",e.target.value)}/>
+        <div className="writing-status"><span>{countWords(work.body)} words · {bookPages(work.body,work.layout).length} book {bookPages(work.body,work.layout).length===1?"page":"pages"}</span><span>Line breaks stay as you write them.</span></div>
+      </section><aside className="editor-settings"><h2>Make it yours</h2><label>Writing type<select value={work.kind} onChange={e=>change("kind",e.target.value)}>{Object.entries(kinds).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label><label>Collection<input placeholder="An optional shelf name" value={work.collection} maxLength={80} onChange={e=>change("collection",e.target.value)}/></label>
+        <fieldset><legend>Book cover</legend><div className="swatches">{["forest","clay","linen","night"].map(t=><button key={t} className={"swatch "+t+(t===work.theme?" chosen":"")} aria-label={t+" cover"} aria-pressed={t===work.theme} onClick={()=>change("theme",t)}>{t===work.theme?<Check size={18}/>:null}</button>)}</div></fieldset>
+        <p className="setting-note">Use a page break where a poem or chapter should turn. Long pages scroll, so nothing is cut off.</p>
+        <LayoutControls value={work.layout} onChange={v=>change("layout",v)}/>
+        <Button icon={Bookmark} disabled={busy} onClick={()=>{setVersionName("");setModal("name-version");}}>Save named version</Button>
+        {work.versionName&&<p className="setting-note">Current saved edition: <strong>{work.versionName}</strong></p>}
+        <div className="settings-divider"/><span className="privacy-label"><Lock size={15}/>Private draft</span><p className="setting-note">No automatic publishing. No AI detectors. No rewriting your words.</p>
+        {work.id&&<><Button icon={Link2} disabled={busy} onClick={share}>{work.shareToken?"Manage snapshot":"Share snapshot"}</Button><Button icon={Download} disabled={busy||dirty} onClick={()=>exportWorks([work.id])}>Export writing</Button><Button icon={History} onClick={showHistory}>Saved versions</Button><Button icon={Archive} onClick={toggleArchive}>{work.archived?"Restore to library":"Archive writing"}</Button></>}
+        {work.source&&<div className="source-card"><small>IMPORTED FROM {work.source.platform.toUpperCase()}</small><p>Your imported original is kept separately from your edits.</p><button onClick={()=>setModal("original")}>View original source <ExternalLink size={14}/></button>{work.source.platform==="Google Docs text copy"&&<button onClick={()=>{if(!abandon())return;setShareUrl(work.source.url);setModal("import");}}>Review a newer Google draft <RefreshCw size={14}/></button>}</div>}
+      </aside></div>
+    </main>}
+  </div>}
+  {toast&&<div className="toast" role="status"><Check size={18}/>{toast}</div>}
+  {modal==="import"&&<ImportModal initialName={work?.title||""} initialUrl={shareUrl.startsWith("https:")&&!shareUrl.includes("#share=")?shareUrl:""} onClose={()=>{setModal("");setShareUrl("");}} onDone={async message=>{setModal("");setShareUrl("");await refresh();setWork(null);setSaved("");setView("library");setFilter("all");notice(message);}}/>}
+  {modal==="about"&&<Modal title="The Writes promise" onClose={()=>setModal("")}><div className="modal-body prose"><p>Your writing can begin anywhere. It should not have to stay there.</p><ul><li><strong>A copy you control.</strong> Imports become independent text copies. Their originals remain attached.</li><li><strong>Your voice, untouched.</strong> Plain-text editing preserves line breaks, indentation, and stanza spacing.</li><li><strong>An open door.</strong> Export TXT, Markdown, readable HTML, JSON, and saved revisions in a ZIP.</li><li><strong>You decide what leaves.</strong> Drafts stay private. Sharing creates a separate snapshot; later edits do not silently publish.</li></ul><p>This first version is text-only. Illustration, image archiving, and AI assistance are later additions, not hidden dependencies.</p><p className="fineprint">{cfg.mode==="production"?"Your private library is stored in the Social Desk Club AWS account. Export anything important so you always keep a copy you control.":"The preview uses temporary development hosting, not your live AWS library. Export anything important before relying on it."}</p></div></Modal>}
+  {modal==="arrange"&&<Modal title="Give your verses room" wide onClose={()=>{if(!busy)setModal("");}}>{error&&<p className="form-error" role="alert">{error}</p>}<VerseArranger body={work.body} busy={busy} onCancel={()=>setModal("")} onApply={body=>{change("body",body);setModal("");notice("Arrangement applied to your draft. Save when you are ready.");}} onAlternate={alternate}/></Modal>}
+  {modal==="name-version"&&<Modal title="Keep a named version" onClose={()=>{if(!busy)setModal("");}}><form className="modal-body" onSubmit={async e=>{e.preventDefault();if(await save(versionName.trim()))setModal("");}}>{error&&<p className="form-error" role="alert">{error}</p>}<p>Save the current text and book layout as an edition you can find again. Later changes will not replace this saved version.</p><label>Version name<input autoFocus required maxLength={80} placeholder="Reading-night version" value={versionName} onChange={e=>setVersionName(e.target.value)}/></label><div className="modal-actions"><Button disabled={busy||!versionName.trim()} variant="primary">Save this version</Button></div></form></Modal>}
+  {modal==="history"&&<Modal title="Saved versions" onClose={()=>setModal("")}><div className="modal-body">{history.map(h=><div className="history-row" key={h.version}><div><strong>{h.versionName||`Version ${h.version}`}</strong><small>Version {h.version}{h.version===work.version?" · Current":""} · {new Date(h.updatedAt).toLocaleString()} · {h.body===undefined?h.words:countWords(h.body)} words</small></div><Button disabled={busy} onClick={()=>loadVersion(h)}>Load as draft</Button></div>)}<p className="fineprint">The current version, 20 recent versions, and older named versions are shown. Every retained version is included in exports.</p></div></Modal>}
+  {modal==="original"&&<Modal title="Your imported original" wide onClose={()=>setModal("")}><div className="modal-body"><p>Read-only source captured on {dateLabel(work.source.fetchedAt)}. It is never rendered as executable HTML.</p>{/^https?:/.test(work.source.url)&&<a href={work.source.url} target="_blank" rel="noreferrer">Visit the original post <ExternalLink size={14}/></a>}<pre className="original-text">{work.source.original}</pre></div></Modal>}
+  {modal==="share"&&<Modal title="Share a snapshot, not your draft" wide onClose={()=>setModal("")}><div className="modal-body"><p>Audience: anyone with the link on the live site. Only the title, author, collection, cover, and complete text below are shared. Source files and version history stay private.</p>{cfg.mode!=="production"&&<p className="callout">This Computer preview is private. Links created here test snapshot behavior; they are not public production links.</p>}<h3>{work.title}</h3><p>{work.author}</p><pre className="share-text">{work.body}</pre>{shareUrl&&<label>Snapshot address<input readOnly value={shareUrl} onFocus={e=>e.target.select()}/><a href={shareUrl} target="_blank" rel="noreferrer">Open saved snapshot <ExternalLink size={14}/></a></label>}<div className="modal-actions">{shareUrl&&<Button onClick={revoke} disabled={busy}>Revoke link</Button>}<Button variant="primary" onClick={publish} disabled={busy}>{shareUrl?"Replace snapshot with this version":"Create this snapshot"}</Button></div><p className="fineprint">Recipients may keep copies. Revoking a link cannot recall copies they already made.</p></div></Modal>}
+  </>;
+}
+function ImportModal({initialUrl,initialName,onClose,onDone}){
+  const isGoogle=initialUrl.startsWith("https://docs.google.com/document/");
+  const [tab,setTab]=useState(isGoogle?"google":"feed"),[url,setUrl]=useState(isGoogle?"":initialUrl),[name,setName]=useState(isGoogle?(initialName||"Google Docs draft"):"Pasted writing.txt"),[text,setText]=useState(""),[base64,setBase64]=useState("");
+  const [googleDocUrl,setGoogleDocUrl]=useState(isGoogle?initialUrl:"");
+  const [job,setJob]=useState(null),[selected,setSelected]=useState([]),[rights,setRights]=useState(false),[approve,setApprove]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  async function run(fn){setBusy(true);setError("");try{await fn();}catch(e){setError(e.message);}finally{setBusy(false);}}
+  async function file(e){
+    setError("");const f=e.target.files[0];if(!f)return;if(f.size>3000000){setError("Choose a file smaller than 3 MB.");return;}
+    setName(f.name);setText("");setBase64("");
+    if(f.name.toLowerCase().endsWith(".zip")){const r=new FileReader();r.onload=()=>setBase64(r.result.split(",")[1]);r.readAsDataURL(f);}else setText(await f.text());
+  }
+  async function preview(e){e.preventDefault();await run(async()=>{const out=await api("/import/preview","POST",tab==="feed"?{url}:tab==="google"?{googleDocUrl,name,text}:{name,text,base64});setJob(out);setApprove(false);setRights(false);setSelected(out.candidates.filter(c=>c.status==="new").map(c=>c.index));});}
+  async function commit(){await run(async()=>{const out=await api("/import/commit","POST",{jobId:job.jobId,selected,rights,approvedChanges:approve?selected:[]});const n=out.results.filter(r=>["imported","updated"].includes(r.status)).length,pending=out.results.filter(r=>["conflict","needs-review"].includes(r.status)).length;if(pending){setError(`${n} saved. ${pending} changed while you were reviewing. Preview again before updating those pieces.`);setJob(null);}else await onDone(`${n} ${n===1?"piece":"pieces"} saved to your private library.`);});}
+  return <Modal title={job?"Review before bringing it home":"Bring your writing home"} wide onClose={()=>{if(!busy)onClose();}}><div className="modal-body">
+    {error&&<p className="form-error" role="alert">{error}</p>}
+    {!job?<><p>Copy your own writing into an independent library. Nothing is posted back to its source.</p><div className="tabs" role="tablist" aria-label="Import method">{[["feed","Publication feed"],["google","Google Docs paste"],["file","Upload a file"],["paste","Paste text"]].map(([id,label])=><button role="tab" aria-selected={tab===id} key={id} onClick={()=>{setTab(id);setError("");setName(id==="google"?"Google Docs draft":"Pasted writing.txt");setText("");setBase64("");}}>{label}</button>)}</div><form onSubmit={preview}>
+      {tab==="google"?<><p className="callout">No live Google connection. Paste your draft or upload its TXT export. The document address only matches later imports to the same writing — it never fetches the Doc.</p><label>Google Doc address<input type="url" required placeholder="https://docs.google.com/document/d/…" value={googleDocUrl} onChange={e=>setGoogleDocUrl(e.target.value)}/></label><label>Writing title<input required maxLength={180} value={name} onChange={e=>setName(e.target.value)}/></label><label>Plain-text export<input type="file" accept=".txt" aria-label="Google Docs text export" onChange={async e=>{const f=e.target.files[0];if(!f)return;if(!f.name.toLowerCase().endsWith(".txt")||f.size>120000){setError("Choose a TXT export smaller than 120 KB.");return;}setName(f.name.replace(/\.txt$/i,""));setText(await f.text());setError("");}}/></label><label>Draft text<textarea required className="paste-input" value={text} onChange={e=>setText(e.target.value)} placeholder="Paste the draft, keeping its line breaks."/></label><p className="fineprint">Review spacing before importing. Only this text is archived, not Google comments, formatting, images, or earlier Google revisions. Re-import with the same Doc address when you want to review a newer draft.</p></>:tab==="feed"?<><label>Medium, Substack, or RSS address<input required type="url" placeholder="https://your-publication.substack.com" value={url} onChange={e=>setUrl(e.target.value)}/></label><p className="fineprint">Medium profile: https://medium.com/@yourname<br/>Substack publication: https://yourname.substack.com<br/>For custom domains, use the full RSS feed address.</p></>:tab==="file"?<><label className="file-drop"><Upload size={28}/><strong>Choose an export or a writing file</strong><span>TXT, MD, HTML, JSON, ZIP · up to 3 MB</span><input aria-label="Writing file" type="file" accept=".txt,.md,.html,.htm,.json,.zip" onChange={file}/></label>{(text||base64)&&<p className="file-selected"><Check size={16}/>{name}</p>}<p className="fineprint">ZIP imports read up to 40 text articles. Images and other media are not copied. A full Writes JSON backup restores current text and metadata; earlier versions remain in the ZIP for safekeeping.</p></>:<><label>File or piece name<input value={name} required onChange={e=>setName(e.target.value)}/></label><label>Your text<textarea className="paste-input" required value={text} onChange={e=>setText(e.target.value)}/></label></>}
+      <div className="callout"><Lock size={17}/><span>Feeds can be incomplete or excerpt-only. Imported HTML is converted to plain text, so review poetry spacing before saving.</span></div><div className="modal-actions"><Button disabled={busy||(tab==="file"&&!text&&!base64)} variant="primary">{busy?"Reading the source…":"Preview import"}</Button></div></form></>:
+    <><p className="callout">{job.warning}</p><div className="import-list">{job.candidates.map(c=><div className={"import-item "+(c.status==="unchanged"?"unchanged":"")} key={c.index}><label className="candidate-label"><input type="checkbox" disabled={c.status==="unchanged"} checked={selected.includes(c.index)} onChange={e=>setSelected(s=>e.target.checked?[...s,c.index]:s.filter(i=>i!==c.index))}/><span><strong>{c.title}</strong><small>{c.platform} · {c.status==="new"?"New copy":c.status==="unchanged"?"Already in your library":"Changed source: review required"}</small></span></label><details><summary>Read imported text{c.status==="changed"?" and compare":""}</summary>{c.status==="changed"&&<><h4>Your current writing</h4><pre>{c.existingBody}</pre><h4>Incoming text</h4></>}<pre>{c.body||"(No text in this feed entry)"}</pre></details></div>)}</div>
+      <label className="check-label"><input type="checkbox" checked={rights} onChange={e=>setRights(e.target.checked)}/><span>I own the selected writing or have permission to copy it.</span></label>
+      {job.candidates.some(c=>c.status==="changed"&&selected.includes(c.index))&&<label className="check-label"><input type="checkbox" checked={approve} onChange={e=>setApprove(e.target.checked)}/><span>I reviewed the changes. Replace the selected current text and keep its previous version in history.</span></label>}
+      <div className="modal-actions"><Button disabled={busy} onClick={()=>setJob(null)}>Back</Button><Button variant="primary" disabled={busy||!rights||!selected.length||(job.candidates.some(c=>c.status==="changed"&&selected.includes(c.index))&&!approve)} onClick={commit}>{busy?"Saving copies…":`Import ${selected.length} ${selected.length===1?"piece":"pieces"}`}</Button></div>
+    </>}
+  </div></Modal>;
+}
+function Reader({work,onClose,publicView=false}){
+  const pages=bookPages(work.body,work.layout),[index,setIndex]=useState(0),[mode,setMode]=useState("book"),[wrap,setWrap]=useState(work.kind!=="poetry"),[flipping,setFlipping]=useState(false);
+  const mobile=useRef(matchMedia("(max-width: 760px)").matches),[small,setSmall]=useState(mobile.current);
+  const pageCount=pages.length+1,step=small?1:2,max=Math.floor((pageCount-1)/step)*step;
+  useEffect(()=>{const m=matchMedia("(max-width: 760px)"),fn=()=>{setSmall(m.matches);setIndex(0);};m.addEventListener("change",fn);return()=>m.removeEventListener("change",fn);},[]);
+  function turn(delta){setIndex(i=>Math.max(0,Math.min(max,i+delta*step)));setFlipping(true);setTimeout(()=>setFlipping(false),330);}
+  useEffect(()=>{const fn=e=>{if(e.key==="ArrowRight")turn(1);if(e.key==="ArrowLeft")turn(-1);if(e.key==="Escape")onClose();};window.addEventListener("keydown",fn);return()=>window.removeEventListener("keydown",fn);},[max,step]);
+  function page(n){return n===0?<div className={"reader-cover "+work.theme}><span className="cover-top">{kinds[work.kind]}</span><div><h1>{work.title}</h1><p>{work.author||"By you"}</p></div><span className="cover-bottom">SOCIAL DESK CLUB · WRITES</span></div>:n<=pages.length?<div className="reader-page"><div className="running-head">{work.title}</div><VerseText text={pages[n-1]} layout={work.layout} wrap={wrap}/><span className="folio">{n}</span></div>:<div className="reader-page end-page"><Feather size={24}/><p>A little space<br/>for what comes next.</p></div>;}
+  return <main className="reader"><div className="reader-toolbar"><Button icon={ArrowLeft} variant="quiet" onClick={onClose}>{publicView?"Writing desk":"Back to desk"}</Button><span>{publicView?"SHARED SNAPSHOT":"YOUR BOOK, UNBOUND"}</span><div className="reader-switch"><Button icon={mode==="book"?AlignLeft:BookOpen} onClick={()=>setMode(mode==="book"?"scroll":"book")}>{mode==="book"?"Scroll view":"Book view"}</Button></div></div>
+    <div className="reader-sub"><span>{work.collection||"An independent edition"}</span><label className="check-label"><input type="checkbox" checked={wrap} onChange={e=>setWrap(e.target.checked)}/>Wrap long lines</label></div>
+    {mode==="book"?<><div className={"book-spread "+(flipping?"turning":"")}>{page(index)}{!small&&page(index+1)}</div><div className="reader-controls"><button className="icon-button" aria-label="Previous page" disabled={index===0} onClick={()=>turn(-1)}><ArrowLeft/></button><span>{index===0?"Cover":`Page ${index}`} {small?"":index+1<=pages.length?`/ ${index+1}`:""}<small>{pages.length} text {pages.length===1?"page":"pages"} · use arrow keys</small></span><button className="icon-button" aria-label="Next page" disabled={index>=max} onClick={()=>turn(1)}><ArrowRight/></button></div><p className="reader-hint">Long pages scroll inside the book. {wrap?"Lines wrap to fit.":"Original line lengths are preserved; scroll sideways if needed."}</p></>:<article className="scroll-reader"><h1>{work.title}</h1><p>{work.author}</p>{pages.map((p,i)=><React.Fragment key={i}>{i>0&&<hr/>}<VerseText text={p} layout={work.layout} wrap={wrap}/></React.Fragment>)}</article>}
+  </main>;
+}
+createRoot(document.getElementById("root")).render(<App/>);

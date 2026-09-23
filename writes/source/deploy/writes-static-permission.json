@@ -1,0 +1,22 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WritesFrontendOnly",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": [
+        "arn:aws:s3:::socialdeskclub.com/writes/index.html",
+        "arn:aws:s3:::socialdeskclub.com/writes/app.js",
+        "arn:aws:s3:::socialdeskclub.com/writes/app.css",
+        "arn:aws:s3:::socialdeskclub.com/writes/config.js"
+      ]
+    },
+    {
+      "Sid": "ReviewedHomepageNavigationOnly",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::socialdeskclub.com/index.html"
+    }
+  ]
+}
