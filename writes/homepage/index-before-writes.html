@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Social Desk Club</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Social Desk Club — A collection of projects exploring reading, community, and curiosity.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-deep: #3a2f1e;
+      --bg-main: #443826;
+      --bg-header: #1a1510;
+      --gold: #ddb876;
+      --gold-bright: #f0cc7a;
+      --gold-dark: #a68a61;
+      --bronze: #ba8950;
+      --copper: #c88040;
+      --ink: #443c2e;
+      --cream: #f5e3c3;
+      --font-display: 'Playfair Display', Georgia, serif;
+      --font-body: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+    body {
+      font-family: var(--font-body);
+      background: var(--bg-main);
+      color: var(--cream);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      background: radial-gradient(circle at 30% 30%, #b99869 0%, #665544dd 80%);
+      opacity: 0.14;
+    }
+    header {
+      background: var(--bg-header);
+      padding: 1.2em 1.5em;
+      border-bottom: 3px double var(--gold-dark);
+      position: relative;
+      z-index: 10;
+      text-align: center;
+    }
+    header h1 {
+      font-family: var(--font-display);
+      font-size: clamp(1.5rem, 4vw, 2.4rem);
+      letter-spacing: 2px;
+      background: linear-gradient(135deg, var(--gold-bright), var(--gold), var(--bronze));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    header p {
+      font-size: 0.88rem;
+      color: var(--gold-dark);
+      margin-top: 0.3em;
+      opacity: 0.8;
+    }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 3em 1.5em;
+      position: relative;
+      z-index: 1;
+    }
+    .projects-heading {
+      font-family: var(--font-display);
+      font-size: 1.1rem;
+      color: var(--gold-dark);
+      margin-bottom: 2em;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      opacity: 0.7;
+    }
+    .projects {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 2em;
+      max-width: 900px;
+      width: 100%;
+    }
+    .project-card {
+      background: rgba(235, 219, 198, 0.08);
+      border: 2px solid var(--gold-dark);
+      border-radius: 16px;
+      padding: 2em 1.8em;
+      text-align: center;
+      transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+                  box-shadow 0.2s, border-color 0.2s, background 0.2s;
+      text-decoration: none;
+      color: inherit;
+      display: block;
+    }
+    .project-card:hover {
+      transform: scale(1.03) rotate(-0.5deg);
+      box-shadow: 0 16px 48px rgba(58, 47, 30, 0.3);
+      border-color: var(--gold);
+      background: rgba(235, 219, 198, 0.14);
+    }
+    .project-icon {
+      font-size: 2.6rem;
+      margin-bottom: 0.6em;
+      display: block;
+    }
+    .project-card h2 {
+      font-family: var(--font-display);
+      font-size: 1.3rem;
+      color: var(--gold-bright);
+      margin-bottom: 0.4em;
+    }
+    .project-card p {
+      font-size: 0.88rem;
+      color: var(--gold-dark);
+      line-height: 1.5;
+    }
+    .project-tag {
+      display: inline-block;
+      margin-top: 1em;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--copper);
+      background: rgba(200, 128, 64, 0.12);
+      padding: 0.25em 0.8em;
+      border-radius: 4px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+    footer {
+      background: rgba(26, 21, 16, 0.85);
+      text-align: center;
+      padding: 1.2em;
+      border-top: 3px double var(--gold-dark);
+      position: relative;
+      z-index: 1;
+      font-size: 0.82rem;
+    }
+    footer p { opacity: 0.5; }
+    @media (max-width: 600px) {
+      .projects { grid-template-columns: 1fr; }
+      main { padding: 2em 1em; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Social Desk Club</h1>
+    <p>Projects in reading, community, and curiosity</p>
+  </header>
+  <main>
+    <p class="projects-heading">Projects</p>
+    <div class="projects">
+      <a href="/reads/index.html" class="project-card">
+        <span class="project-icon">&#128214;</span>
+        <h2>Reads as Deeds</h2>
+        <p>Track your reading journey. Search by ISBN or title, rate books, and set yearly goals.</p>
+        <span class="project-tag">Live</span>
+      </a>
+      <a href="/camp/index.html" class="project-card">
+        <span class="project-icon">&#127957;</span>
+        <h2>Camp List</h2>
+        <p>Shared packing &amp; gear checklist for our camping trips. Check items off together, in real time.</p>
+        <span class="project-tag">Live</span>
+      </a>
+    </div>
+  </main>
+  <footer>
+    <p>&copy; 2025 Social Desk Club</p>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Social Desk Club Writes. Isolated text library; read-only access to existing Reads sessions.
+Parameters:
+  ExistingUsersTable:
+    Type: String
+    Default: reads-users
+Resources:
+  Library:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: writes-only-storage-and-read-session
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:ConditionCheckItem
+                Resource: !GetAtt Library.Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ExistingUsersTable}
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-api:*
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-api
+      Runtime: nodejs24.x
+      Handler: index.handler
+      MemorySize: 512
+      Timeout: 28
+      Role: !GetAtt ApiRole.Arn
+      Environment:
+        Variables:
+          WRITES_TABLE: !Ref Library
+          USERS_TABLE: !Ref ExistingUsersTable
+      Code:
+        ZipFile: |
+          exports.handler = async () => ({
+            statusCode: 503,
+            headers: {'content-type':'application/json'},
+            body: JSON.stringify({error:'Writes setup is incomplete. Upload writes-api.zip before enabling the tab.'})
+          });
+  Logs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ApiFunction}
+      RetentionInDays: 14
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${AWS::StackName}-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - https://socialdeskclub.com
+          - https://www.socialdeskclub.com
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        AllowHeaders: [Content-Type, Authorization]
+        MaxAge: 300
+  Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 29000
+  Route:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: '$default'
+      Target: !Join ['/', ['integrations', !Ref Integration]]
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
+  InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*
+Outputs:
+  WritesApiEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
+  LambdaFunctionName:
+    Value: !Ref ApiFunction
+  LibraryTableName:
+    Value: !Ref Library

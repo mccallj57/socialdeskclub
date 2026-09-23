@@ -1,0 +1,5 @@
+
+# Writes local build artifacts
+writes/source/*.db
+writes/source/dist/
+writes/source/node_modules/
