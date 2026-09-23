@@ -88,6 +88,9 @@ async function proxyReadsLogin(data){
 export async function handler(event){
   const method=event.requestContext?.http?.method||event.httpMethod,path=event.rawPath||event.path||"",headers={"content-type":"application/json","cache-control":"no-store","x-content-type-options":"nosniff"};
   try{
+    // API Gateway CORS should answer preflight, but $default can still invoke Lambda.
+    // Browsers require 2xx on OPTIONS; a 401 here becomes TypeError: Failed to fetch.
+    if(method==="OPTIONS")return {statusCode:204,headers};
     if(method==="GET"&&path==="/api/health")return {statusCode:200,headers,body:JSON.stringify({ok:true,mode:"production"})};
     let data={};
     if(event.body){
