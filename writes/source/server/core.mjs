@@ -133,7 +133,7 @@ export class Writes {
         previews.push({index,title:c.title,author:c.author,body:c.body,status,platform:c.source.platform,existingBody:existing?.body});
       }
       await this.store.commit([{pk:owner,sk:"job#"+jobId,value:{expiresAt,count:candidates.length,source,version:1},expected:0}]);
-      return {jobId,candidates:previews,warning:data.googleDocUrl?"This is an independent text copy, not a live Google connection. Re-import using the same document address to review a later draft. Google’s revision history, comments, formatting, and media are not imported.":"RSS may include only recent posts or excerpts. This version imports text, not images, audio, or video. Review the result against your original."};
+      return {jobId,candidates:previews,warning:data.googleDocUrl?"This is an independent text copy, not a live Google connection. Re-import using the same document address to review a later draft. Google’s revision history, comments, formatting, and media are not imported.":"RSS may include only recent posts or excerpts. HTTPS images from the feed are kept as linked addresses (for example Medium’s CDN). Image files are not downloaded into Writes storage. Audio and video are still skipped. Review the result against your original."};
     }
     if (path === "/api/import/commit" && method === "POST") {
       if (data.rights !== true) fail("Confirm that you own this writing or have permission to copy it.");

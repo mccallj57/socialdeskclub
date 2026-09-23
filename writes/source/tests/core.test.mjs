@@ -84,6 +84,18 @@ test("HTML import is inert text and preserves explicit poetry spacing",()=>{
   assert.equal(result,"First\nsecond\n\nThird");
   assert.throws(()=>parseFeed('<!DOCTYPE rss [<!ENTITY x "bad">]><rss/>',"https://example.com"),/entity/);
 });
+test("Medium-style feed images become linked markdown markers",()=>{
+  const html='<p>Hello</p><figure><img alt="Cover" src="https://cdn-images-1.medium.com/max/1024/1*abc.png" /></figure><img width="1" height="1" src="https://medium.com/_/stat?event=post.clientViewed&postId=x" alt=""><p>Bye</p>';
+  const body=htmlText(html);
+  assert.match(body,/!\[Cover\]\(https:\/\/cdn-images-1\.medium\.com\/max\/1024\/1\*abc\.png\)/);
+  assert.doesNotMatch(body,/medium\.com\/_\/stat/);
+  assert.doesNotMatch(body,/\[Image\]/);
+  assert.match(body,/Hello/);
+  assert.match(body,/Bye/);
+  const feed=parseFeed(`<rss><channel><item><guid>1</guid><title>Post</title><link>https://medium.com/p/1</link><content:encoded><![CDATA[${html}]]></content:encoded></item></channel></rss>`,"https://medium.com/feed/@writer");
+  assert.equal(feed[0].source.platform,"Medium");
+  assert.match(feed[0].body,/!\[Cover\]\(/);
+});
 test("ZIP reads exported archive once, rather than duplicating format variants",async()=>{
   const zip=new JSZip();zip.file("writes-library.json",JSON.stringify({works:[{...original,id:"x"}]}));zip.file("piece/writing.txt",original.body);zip.file("piece/read.html","<p>Duplicate</p>");zip.file("piece/revisions/1.json",JSON.stringify(original));
   const works=await parseZip(await zip.generateAsync({type:"base64"}));assert.equal(works.length,1);assert.equal(works[0].body,original.body);

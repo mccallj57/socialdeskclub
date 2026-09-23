@@ -1,11 +1,18 @@
 import React,{useState} from "react";
 import {ArrowUp,ArrowDown,Undo2} from "lucide-react";
 import {DEFAULT_LAYOUT,stanzaParts,joinStanzas,moveStanza} from "../../shared/poetry.mjs";
+import {splitManuscript} from "../../shared/manuscript.mjs";
+
+function ManuscriptChunk({text}) {
+  return splitManuscript(text).map((part,i)=>part.type==="image"
+    ? <img key={i} className="manuscript-image" src={part.src} alt={part.alt||""} loading="lazy" referrerPolicy="no-referrer"/>
+    : <span key={i} className="manuscript-text">{part.value}</span>);
+}
 
 export function VerseText({text,layout={},wrap=false}) {
   const l={...DEFAULT_LAYOUT,...layout};
   return <div className={"poem "+(wrap?"wrap":"")} style={{lineHeight:l.lineHeight,textAlign:l.align}}>
-    {l.stanzaGap==="original"?text:<div className={"verse-spacing "+l.stanzaGap}>{stanzaParts(text).blocks.map((b,i)=><div key={i}>{b}</div>)}</div>}
+    {l.stanzaGap==="original"?<ManuscriptChunk text={text}/>:<div className={"verse-spacing "+l.stanzaGap}>{stanzaParts(text).blocks.map((b,i)=><div key={i}><ManuscriptChunk text={b}/></div>)}</div>}
   </div>;
 }
 export function LayoutControls({value,onChange}) {

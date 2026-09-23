@@ -56,6 +56,21 @@ export async function safeFetch(input, redirects = 0) {
   });
 }
 const BLOCK = new Set(["P","DIV","SECTION","ARTICLE","H1","H2","H3","H4","BLOCKQUOTE","LI","UL","OL","FIGURE","FIGCAPTION"]);
+/** Keep HTTPS feed images as markdown markers; skip trackers / non-public schemes. */
+function imageMarkdown(node) {
+  const src = (node.getAttribute("src") || "").trim();
+  const alt = (node.getAttribute("alt") || "").trim().replace(/[\[\]]/g, "");
+  const width = node.getAttribute("width");
+  const height = node.getAttribute("height");
+  if (width === "1" && height === "1") return "";
+  if (!src || /medium\.com\/_\/stat/i.test(src) || /^data:/i.test(src)) return "";
+  let url;
+  try { url = new URL(src); } catch { return alt ? `[Image: ${alt}]\n` : ""; }
+  if (url.protocol !== "https:" || url.username || url.password) return alt ? `[Image: ${alt}]\n` : "";
+  // Prefer full-size Medium CDN variants when the feed ships a max/N path.
+  const href = url.toString().replace(/[)\s]/g, encodeURIComponent);
+  return `![${alt}](${href})\n\n`;
+}
 export function htmlText(html) {
   const { document } = parseHTML(`<html><body>${html}</body></html>`);
   document.querySelectorAll("script,style,iframe,object,embed,form,nav,noscript").forEach(n => n.remove());
@@ -63,7 +78,7 @@ export function htmlText(html) {
     if (node.nodeType === 3) return pre ? node.textContent : node.textContent.replace(/[\t\n\r ]+/g, " ");
     if (node.nodeType !== 1) return "";
     if (node.tagName === "BR") return "\n";
-    if (node.tagName === "IMG") return node.getAttribute("alt") ? `[Image: ${node.getAttribute("alt")}]\n` : "[Image]\n";
+    if (node.tagName === "IMG") return imageMarkdown(node);
     const text = [...node.childNodes].map(n => render(n, pre || node.tagName === "PRE")).join("");
     return BLOCK.has(node.tagName) || node.tagName === "PRE" ? text + "\n\n" : text;
   };
