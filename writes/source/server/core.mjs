@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { z } from "zod";
-import { fail, hash, feedUrl, safeFetch, parseFeed, parseFile, parseZip, googleDraft } from "./imports.mjs";
+import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft } from "./imports.mjs";
 import { DEFAULT_LAYOUT } from "../shared/poetry.mjs";
 
 const input = z.object({
@@ -110,15 +110,37 @@ export class Writes {
     }
     if (path === "/api/sources" && method === "GET") return {sources:await this.store.list(owner,"source#")};
     if (path === "/api/import/preview" && method === "POST") {
-      let candidates, source;
+      let candidates, source, feedNote = "";
       if (data.googleDocUrl) {
         candidates=googleDraft(data.googleDocUrl,data.name,data.text);
       } else if (data.url) {
-        const url = feedUrl(data.url);
-        let fetched;
-        try { fetched = await this.fetcher(url); candidates = parseFeed(fetched.text,url); }
+        let resolved;
+        try { resolved = await resolveFeedUrls(data.url); }
         catch(e) { e.status = e.status || 400; throw e; }
-        source = {id:hash(url).slice(0,24),url,updatedAt:now(),version:1};
+        const merged = [];
+        const seen = new Set();
+        for (const feed of resolved.urls) {
+          let fetched;
+          try { fetched = await this.fetcher(feed); }
+          catch(e) { e.status = e.status || 400; throw e; }
+          let items;
+          try { items = parseFeed(fetched.text, feed); }
+          catch(e) {
+            if (resolved.urls.length === 1) { e.status = e.status || 400; throw e; }
+            continue; // skip empty/broken pubs when expanding a profile
+          }
+          for (const item of items) {
+            if (seen.has(item.source.key)) continue;
+            seen.add(item.source.key);
+            merged.push(item);
+            if (merged.length >= 40) break;
+          }
+          if (merged.length >= 40) break;
+        }
+        if (!merged.length) fail("No articles were found across those publication feeds. Try a single publication /feed URL.");
+        candidates = merged;
+        source = {id:hash(resolved.label).slice(0,24),url:resolved.label,updatedAt:now(),version:1};
+        if (resolved.handle) feedNote = `Loaded public publications from @${resolved.handle}. `;
       } else if (data.name?.toLowerCase().endsWith(".zip")) candidates = await parseZip(data.base64 || "");
       else candidates = parseFile(data.name || "Pasted writing.txt",data.text || "");
       const jobId = crypto.randomUUID(), expiresAt = Math.floor(Date.now()/1000)+1800;
@@ -133,7 +155,7 @@ export class Writes {
         previews.push({index,title:c.title,author:c.author,body:c.body,status,platform:c.source.platform,existingBody:existing?.body});
       }
       await this.store.commit([{pk:owner,sk:"job#"+jobId,value:{expiresAt,count:candidates.length,source,version:1},expected:0}]);
-      return {jobId,candidates:previews,warning:data.googleDocUrl?"This is an independent text copy, not a live Google connection. Re-import using the same document address to review a later draft. Google’s revision history, comments, formatting, and media are not imported.":"RSS may include only recent posts or excerpts. HTTPS images from the feed are kept as linked addresses (for example Medium’s CDN). Image files are not downloaded into Writes storage. Audio and video are still skipped. Review the result against your original."};
+      return {jobId,candidates:previews,warning:data.googleDocUrl?"This is an independent text copy, not a live Google connection. Re-import using the same document address to review a later draft. Google’s revision history, comments, formatting, and media are not imported.":feedNote+"RSS may include only recent posts or excerpts. HTTPS images from the feed are kept as linked addresses (for example Medium or Substack CDNs). Image files are not downloaded into Writes storage. Audio and video are still skipped. Review the result against your original."};
     }
     if (path === "/api/import/commit" && method === "POST") {
       if (data.rights !== true) fail("Confirm that you own this writing or have permission to copy it.");

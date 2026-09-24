@@ -12,14 +12,96 @@ const bytes = value => Buffer.byteLength(value, "utf8");
 export function publicAddress(address) {
   try { return ipaddr.process(address).range() === "unicast"; } catch { return false; }
 }
+function barePath(pathname) {
+  const path = (pathname || "/").replace(/\/+$/, "") || "/";
+  return path;
+}
+/** Sync rewrite: Medium, *.substack.com roots, and homepage-like blogs (WordPress / Substack custom domains) → /feed. */
 export function feedUrl(input) {
   let url;
   try { url = new URL(input.trim()); } catch { fail("Enter a complete https:// publication or RSS address."); }
   if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443")) fail("Use a public HTTPS address without credentials or a custom port.");
   if (url.hostname === "medium.com" && !url.pathname.startsWith("/feed/")) url.pathname = "/feed/" + url.pathname.replace(/^\//, "");
-  if (url.hostname.endsWith(".substack.com") && ["/", ""].includes(url.pathname)) url.pathname = "/feed";
+  else if (url.hostname.endsWith(".substack.com")) {
+    const path = barePath(url.pathname);
+    if (path === "/" || path === "/archive" || path === "/posts") url.pathname = "/feed";
+  } else if (url.hostname !== "substack.com") {
+    // Custom domains (Substack, WordPress, many blogs): homepage → /feed
+    const path = barePath(url.pathname);
+    if (path === "/" || path === "/posts" || path === "/blog") url.pathname = "/feed";
+  }
   url.hash = "";
   return url.toString();
+}
+export function substackProfileHandle(input) {
+  let url;
+  try { url = new URL(String(input).trim()); } catch { return null; }
+  if (url.hostname !== "substack.com") return null;
+  const match = barePath(url.pathname).match(/^\/@([A-Za-z0-9_-]+)(?:\/(?:posts|notes|about))?$/);
+  return match ? match[1] : null;
+}
+export function publicationFeedUrl(pub = {}) {
+  const custom = typeof pub.custom_domain === "string" ? pub.custom_domain.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "") : "";
+  if (custom) return `https://${custom}/feed`;
+  const sub = typeof pub.subdomain === "string" ? pub.subdomain.trim() : "";
+  if (sub) return `https://${sub}.substack.com/feed`;
+  fail("That Substack publication does not expose a public feed address.");
+}
+/** Resolve one paste into one or more RSS URLs. Substack @profile expands to public admin publications. */
+export async function resolveFeedUrls(input, fetchJson = defaultJsonFetch) {
+  const handle = substackProfileHandle(input);
+  if (handle) {
+    let profile;
+    try {
+      profile = await fetchJson(`https://substack.com/api/v1/user/${encodeURIComponent(handle)}/public_profile`);
+    } catch {
+      fail("Could not look up that Substack profile. Paste a publication address (for example https://name.substack.com) or its /feed URL.");
+    }
+    const rows = Array.isArray(profile?.publicationUsers) ? profile.publicationUsers : [];
+    const feeds = [];
+    const seen = new Set();
+    const ordered = [...rows].sort((a, b) => Number(!!b?.is_primary) - Number(!!a?.is_primary));
+    for (const row of ordered) {
+      if (!row?.public || row.role !== "admin" || !row.publication) continue;
+      let feed;
+      try { feed = publicationFeedUrl(row.publication); } catch { continue; }
+      if (seen.has(feed)) continue;
+      seen.add(feed);
+      feeds.push(feed);
+    }
+    if (!feeds.length) fail("This Substack profile has no public publications with RSS feeds. Paste a publication homepage or /feed URL instead.");
+    return { urls: feeds, label: `https://substack.com/@${handle}`, handle };
+  }
+  const url = feedUrl(input);
+  return { urls: [url], label: url };
+}
+async function defaultJsonFetch(url) {
+  const host = new URL(url).hostname;
+  const records = await dns.lookup(host, { all: true });
+  if (!records.length || records.some(r => !publicAddress(r.address))) fail("That address is not a public internet feed.");
+  const record = records[0];
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => req.destroy(new Error("The profile lookup took too long.")), 10000);
+    const req = https.get(url, {
+      headers: { "User-Agent": "SocialDeskClub-Writes/0.1 (user-requested RSS import)", Accept: "application/json", "Accept-Encoding": "identity" },
+      lookup: (_h, opts, cb) => opts?.all ? cb(null, [record]) : cb(null, record.address, record.family),
+    }, response => {
+      if (response.statusCode !== 200) { response.resume(); clearTimeout(timer); reject(new Error(`Profile lookup returned HTTP ${response.statusCode}.`)); return; }
+      const chunks = []; let size = 0;
+      response.on("data", chunk => {
+        size += chunk.length;
+        if (size > 2_000_000) req.destroy(new Error("Profile response too large."));
+        else chunks.push(chunk);
+      });
+      response.on("end", () => {
+        clearTimeout(timer);
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+        catch { reject(new Error("Profile response was not JSON.")); }
+      });
+      response.on("error", reject);
+    });
+    req.on("error", error => { clearTimeout(timer); reject(error); });
+  });
 }
 // DNS is checked and pinned into https.request's lookup. Revalidate every redirect.
 // Do not replace this with unvalidated fetch(url): it would allow DNS rebinding.
@@ -58,16 +140,23 @@ export async function safeFetch(input, redirects = 0) {
 const BLOCK = new Set(["P","DIV","SECTION","ARTICLE","H1","H2","H3","H4","BLOCKQUOTE","LI","UL","OL","FIGURE","FIGCAPTION"]);
 /** Keep HTTPS feed images as markdown markers; skip trackers / non-public schemes. */
 function imageMarkdown(node) {
-  const src = (node.getAttribute("src") || "").trim();
+  let src = (node.getAttribute("src") || "").trim();
   const alt = (node.getAttribute("alt") || "").trim().replace(/[\[\]]/g, "");
   const width = node.getAttribute("width");
   const height = node.getAttribute("height");
   if (width === "1" && height === "1") return "";
+  // Substack often wraps CDN URLs; prefer the durable original from data-attrs when present.
+  const rawAttrs = node.getAttribute("data-attrs");
+  if (rawAttrs) {
+    try {
+      const attrs = JSON.parse(rawAttrs);
+      if (typeof attrs?.src === "string" && /^https:\/\//i.test(attrs.src)) src = attrs.src.trim();
+    } catch { /* keep src */ }
+  }
   if (!src || /medium\.com\/_\/stat/i.test(src) || /^data:/i.test(src)) return "";
   let url;
   try { url = new URL(src); } catch { return alt ? `[Image: ${alt}]\n` : ""; }
   if (url.protocol !== "https:" || url.username || url.password) return alt ? `[Image: ${alt}]\n` : "";
-  // Prefer full-size Medium CDN variants when the feed ships a max/N path.
   const href = url.toString().replace(/[)\s]/g, encodeURIComponent);
   return `![${alt}](${href})\n\n`;
 }
@@ -106,16 +195,19 @@ export function googleDraft(address,name,text) {
 }
 export function parseFeed(xml, url) {
   if (/<!DOCTYPE|<!ENTITY/i.test(xml)) fail("Feeds containing document-type or entity declarations are not supported.");
+  if (/^\s*</.test(xml) && !/<rss[\s>]|<feed[\s>]/i.test(xml)) fail("That address returned a web page, not an RSS feed. Use the publication homepage, /feed URL, or a Substack @profile.");
   const root = new XMLParser({ ignoreAttributes: false, processEntities: false, trimValues: false, parseTagValue: false }).parse(xml);
   let items = root.rss?.channel?.item || root.feed?.entry;
   if (!items) fail("No articles were found. Use the publication's RSS feed or import an export file.");
   if (!Array.isArray(items)) items = [items];
+  const host = new URL(url).hostname;
+  const generator = string(root.rss?.channel?.generator || root.feed?.generator);
+  const platform = host.includes("medium") ? "Medium" : host.includes("substack") || /substack/i.test(generator) ? "Substack" : "RSS";
   return items.slice(0, 40).map(item => {
     let link = item.link;
     if (Array.isArray(link)) link = link.find(l => l["@_rel"] === "alternate") || link[0];
     const href = typeof link === "object" ? link?.["@_href"] : link;
     const content = string(item["content:encoded"] || item.content || item.description || item.summary);
-    const platform = new URL(url).hostname.includes("medium") ? "Medium" : new URL(url).hostname.includes("substack") ? "Substack" : "RSS";
     return candidate({ title: htmlText(string(item.title)), author: string(item["dc:creator"]) || string(item.author?.name) || string(item.author), body: htmlText(content), original: content, url: /^https?:\/\//i.test(href) ? href : "", key: hash(url + "|" + (string(item.guid || item.id) || href || string(item.title))), platform });
   });
 }

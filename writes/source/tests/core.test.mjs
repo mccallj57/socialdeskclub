@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import JSZip from "jszip";
 import { SQLiteStore, Conflict } from "../server/storage.mjs";
 import { Writes } from "../server/core.mjs";
-import { publicAddress, feedUrl, htmlText, parseFeed, parseFile, parseZip, safeFetch } from "../server/imports.mjs";
+import { publicAddress, feedUrl, htmlText, parseFeed, parseFile, parseZip, safeFetch, resolveFeedUrls, publicationFeedUrl, substackProfileHandle } from "../server/imports.mjs";
 const setup = () => { const store=new SQLiteStore(":memory:");return {store,app:new Writes(store)}; };
 const original={title:"A poem",body:"  First line\nsecond line\n\n    a stanza.\n\n[[page]]\n\nLast line",kind:"poetry",author:"Author"};
 test("poetry survives saving, editing, history and portable JSON",async()=>{
@@ -77,6 +77,27 @@ test("private, loopback, link-local and mapped IP addresses are blocked",async()
   assert.throws(()=>feedUrl("https://example.com:8443"),/port/);
   assert.equal(feedUrl("https://writer.substack.com"),"https://writer.substack.com/feed");
   assert.equal(feedUrl("https://medium.com/@writer"),"https://medium.com/feed/@writer");
+  assert.equal(feedUrl("https://www.blog.farmapper.com/"),"https://www.blog.farmapper.com/feed");
+  assert.equal(feedUrl("https://www.blog.farmapper.com/feed"),"https://www.blog.farmapper.com/feed");
+  assert.equal(substackProfileHandle("https://substack.com/@mccallios/posts"),"mccallios");
+  assert.equal(publicationFeedUrl({custom_domain:"www.blog.farmapper.com",subdomain:"farmapper"}),"https://www.blog.farmapper.com/feed");
+  assert.equal(publicationFeedUrl({subdomain:"lexdao"}),"https://lexdao.substack.com/feed");
+});
+test("Substack profile paste expands to public admin publication feeds",async()=>{
+  const profile={
+    publicationUsers:[
+      {public:true,role:"admin",is_primary:false,publication:{name:"Farmapper",subdomain:"farmapper",custom_domain:"www.blog.farmapper.com"}},
+      {public:true,role:"admin",is_primary:true,publication:{name:"Maisa Space",subdomain:"maisaspace",custom_domain:"blog.maisaspace.org"}},
+      {public:false,role:"admin",publication:{subdomain:"secret"}},
+      {public:true,role:"contributor",publication:{subdomain:"other"}},
+    ]
+  };
+  const resolved=await resolveFeedUrls("https://substack.com/@mccallios/posts",async()=>profile);
+  assert.deepEqual(resolved.urls,[
+    "https://blog.maisaspace.org/feed",
+    "https://www.blog.farmapper.com/feed",
+  ]);
+  assert.equal(resolved.handle,"mccallios");
 });
 test("HTML import is inert text and preserves explicit poetry spacing",()=>{
   assert.equal(htmlText("<pre>  one\n\n    two</pre>"),"  one\n\n    two");
@@ -95,6 +116,13 @@ test("Medium-style feed images become linked markdown markers",()=>{
   const feed=parseFeed(`<rss><channel><item><guid>1</guid><title>Post</title><link>https://medium.com/p/1</link><content:encoded><![CDATA[${html}]]></content:encoded></item></channel></rss>`,"https://medium.com/feed/@writer");
   assert.equal(feed[0].source.platform,"Medium");
   assert.match(feed[0].body,/!\[Cover\]\(/);
+});
+test("Substack feed images prefer data-attrs originals and label as Substack",()=>{
+  const html='<p>Hi</p><img alt="Map" src="https://substackcdn.com/image/fetch/w_1456/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fabc.png" data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/abc.png&quot;,&quot;alt&quot;:null}">';
+  const body=htmlText(html);
+  assert.match(body,/!\[Map\]\(https:\/\/substack-post-media\.s3\.amazonaws\.com\/public\/images\/abc\.png\)/);
+  const feed=parseFeed(`<rss><channel><generator>Substack</generator><item><guid>9</guid><title>Farm</title><link>https://www.blog.farmapper.com/p/x</link><content:encoded><![CDATA[${html}]]></content:encoded></item></channel></rss>`,"https://www.blog.farmapper.com/feed");
+  assert.equal(feed[0].source.platform,"Substack");
 });
 test("ZIP reads exported archive once, rather than duplicating format variants",async()=>{
   const zip=new JSZip();zip.file("writes-library.json",JSON.stringify({works:[{...original,id:"x"}]}));zip.file("piece/writing.txt",original.body);zip.file("piece/read.html","<p>Duplicate</p>");zip.file("piece/revisions/1.json",JSON.stringify(original));
