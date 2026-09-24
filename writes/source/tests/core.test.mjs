@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import JSZip from "jszip";
 import { SQLiteStore, Conflict } from "../server/storage.mjs";
 import { Writes } from "../server/core.mjs";
-import { publicAddress, feedUrl, htmlText, parseFeed, parseFile, parseZip, safeFetch } from "../server/imports.mjs";
+import { publicAddress, feedUrl, htmlText, parseFeed, parseFile, parseZip, safeFetch, resolveFeedUrls, publicationFeedUrl, substackProfileHandle, collectAuthorAliases, authorMatches, filterCandidatesByAuthor } from "../server/imports.mjs";
 const setup = () => { const store=new SQLiteStore(":memory:");return {store,app:new Writes(store)}; };
 const original={title:"A poem",body:"  First line\nsecond line\n\n    a stanza.\n\n[[page]]\n\nLast line",kind:"poetry",author:"Author"};
 test("poetry survives saving, editing, history and portable JSON",async()=>{
@@ -77,6 +77,85 @@ test("private, loopback, link-local and mapped IP addresses are blocked",async()
   assert.throws(()=>feedUrl("https://example.com:8443"),/port/);
   assert.equal(feedUrl("https://writer.substack.com"),"https://writer.substack.com/feed");
   assert.equal(feedUrl("https://medium.com/@writer"),"https://medium.com/feed/@writer");
+  assert.equal(feedUrl("https://www.blog.farmapper.com/"),"https://www.blog.farmapper.com/feed");
+  assert.equal(feedUrl("https://www.blog.farmapper.com/feed"),"https://www.blog.farmapper.com/feed");
+  assert.equal(substackProfileHandle("https://substack.com/@mccallios/posts"),"mccallios");
+  assert.equal(publicationFeedUrl({custom_domain:"www.blog.farmapper.com",subdomain:"farmapper"}),"https://www.blog.farmapper.com/feed");
+  assert.equal(publicationFeedUrl({subdomain:"lexdao"}),"https://lexdao.substack.com/feed");
+});
+test("Substack profile paste expands to public admin publication feeds",async()=>{
+  const profile={
+    name:"James McCall",
+    publicationUsers:[
+      {public:true,role:"admin",is_primary:false,publication:{name:"Farmapper",subdomain:"farmapper",custom_domain:"www.blog.farmapper.com"}},
+      {public:true,role:"admin",is_primary:true,publication:{name:"Maisa Space",subdomain:"maisaspace",custom_domain:"blog.maisaspace.org"}},
+      {public:false,role:"admin",publication:{subdomain:"secret"}},
+      {public:true,role:"contributor",publication:{subdomain:"other"}},
+    ]
+  };
+  const resolved=await resolveFeedUrls("https://substack.com/@mccallios/posts",async()=>profile);
+  assert.deepEqual(resolved.urls,[
+    "https://blog.maisaspace.org/feed",
+    "https://www.blog.farmapper.com/feed",
+  ]);
+  assert.equal(resolved.handle,"mccallios");
+  assert.equal(resolved.profileName,"James McCall");
+});
+test("author filter keeps only matching bylines",()=>{
+  const aliases=collectAuthorAliases({display_name:"James McCall",username:"james"},{handle:"mccallios",profileName:"James McCall"},"member#james");
+  assert.ok(aliases.includes("james mccall"));
+  assert.ok(aliases.includes("james"));
+  assert.ok(aliases.includes("mccallios"));
+  assert.equal(authorMatches("James McCall",aliases),true);
+  assert.equal(authorMatches("Samia",aliases),false);
+  assert.equal(authorMatches("Anthony Glukhov",aliases),false);
+  const {kept,skipped,filtered}=filterCandidatesByAuthor(
+    [{author:"James McCall",title:"A"},{author:"Samia",title:"B"},{author:"James McCall",title:"C"}],
+    aliases,
+    {authorsOnly:true}
+  );
+  assert.equal(filtered,true);
+  assert.equal(kept.length,2);
+  assert.equal(skipped,1);
+});
+test("import preview defaults to author-only posts from multi-author feeds",async()=>{
+  const multi=`<rss><channel><generator>Substack</generator>
+    <item><guid>1</guid><title>Mine</title><link>https://www.blog.farmapper.com/p/1</link><dc:creator><![CDATA[James McCall]]></dc:creator><content:encoded><![CDATA[<p>Hi</p>]]></content:encoded></item>
+    <item><guid>2</guid><title>Theirs</title><link>https://blog.maisaspace.org/p/2</link><dc:creator><![CDATA[Samia]]></dc:creator><content:encoded><![CDATA[<p>Yo</p>]]></content:encoded></item>
+  </channel></rss>`;
+  const {store}=setup();
+  const app=new Writes(store,async()=>({url:"https://www.blog.farmapper.com/feed",text:multi}));
+  const job=await app.route("member#james","POST","/api/import/preview",{url:"https://www.blog.farmapper.com/"},{display_name:"James McCall",username:"james"});
+  assert.equal(job.candidates.length,1);
+  assert.equal(job.candidates[0].title,"Mine");
+  assert.equal(job.candidates[0].author,"James McCall");
+  assert.match(job.warning,/Author filter on/i);
+  const all=await app.route("member#james","POST","/api/import/preview",{url:"https://www.blog.farmapper.com/",includeAllAuthors:true},{display_name:"James McCall",username:"james"});
+  assert.equal(all.candidates.length,2);
+});
+test("Substack export ZIP parses posts and dedupes against prior RSS by URL",async()=>{
+  const html='<p>Hello</p><img alt="Hero" src="https://substack-post-media.s3.amazonaws.com/public/images/hero.png"><p>More</p>';
+  const csv='post_id,post_date,is_published,type,title,subtitle,audience\n190318527.we-named-a-mapping-tool-after-a-potato,2023-01-01T00:00:00.000Z,true,newsletter,We Named a Mapping Tool After a Potato.,,everyone\n';
+  const zip=new JSZip();
+  zip.file("posts.csv",csv);
+  zip.file("posts/190318527.we-named-a-mapping-tool-after-a-potato.html",html);
+  const base64=await zip.generateAsync({type:"base64"});
+  const fromZip=await parseZip(base64,{substack:true,publicationUrl:"https://www.blog.farmapper.com/",defaultAuthor:"James McCall"});
+  assert.equal(fromZip.length,1);
+  assert.equal(fromZip[0].title,"We Named a Mapping Tool After a Potato.");
+  assert.equal(fromZip[0].source.url,"https://www.blog.farmapper.com/p/we-named-a-mapping-tool-after-a-potato");
+  assert.match(fromZip[0].coverUrl,/hero\.png/);
+  assert.equal(fromZip[0].source.key,"url|https://www.blog.farmapper.com/p/we-named-a-mapping-tool-after-a-potato");
+
+  const feedXml=`<rss><channel><generator>Substack</generator><item><guid>https://www.blog.farmapper.com/p/we-named-a-mapping-tool-after-a-potato</guid><title>We Named a Mapping Tool After a Potato.</title><link>https://www.blog.farmapper.com/p/we-named-a-mapping-tool-after-a-potato</link><dc:creator><![CDATA[James McCall]]></dc:creator><content:encoded><![CDATA[${html}]]></content:encoded></item></channel></rss>`;
+  const {store}=setup();
+  const app=new Writes(store,async()=>({url:"https://www.blog.farmapper.com/feed",text:feedXml}));
+  const rssJob=await app.route("member#james","POST","/api/import/preview",{url:"https://www.blog.farmapper.com/"},{display_name:"James McCall",username:"james"});
+  await app.route("member#james","POST","/api/import/commit",{jobId:rssJob.jobId,selected:[0],rights:true},{display_name:"James McCall",username:"james"});
+  const zipJob=await app.route("member#james","POST","/api/import/preview",{name:"export.zip",base64,publicationUrl:"https://www.blog.farmapper.com/"},{display_name:"James McCall",username:"james"});
+  assert.equal(zipJob.candidates.length,1);
+  assert.equal(zipJob.candidates[0].status,"unchanged");
+  assert.match(zipJob.warning,/Duplicates match/i);
 });
 test("HTML import is inert text and preserves explicit poetry spacing",()=>{
   assert.equal(htmlText("<pre>  one\n\n    two</pre>"),"  one\n\n    two");
@@ -95,6 +174,13 @@ test("Medium-style feed images become linked markdown markers",()=>{
   const feed=parseFeed(`<rss><channel><item><guid>1</guid><title>Post</title><link>https://medium.com/p/1</link><content:encoded><![CDATA[${html}]]></content:encoded></item></channel></rss>`,"https://medium.com/feed/@writer");
   assert.equal(feed[0].source.platform,"Medium");
   assert.match(feed[0].body,/!\[Cover\]\(/);
+});
+test("Substack feed images prefer data-attrs originals and label as Substack",()=>{
+  const html='<p>Hi</p><img alt="Map" src="https://substackcdn.com/image/fetch/w_1456/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fabc.png" data-attrs="{&quot;src&quot;:&quot;https://substack-post-media.s3.amazonaws.com/public/images/abc.png&quot;,&quot;alt&quot;:null}">';
+  const body=htmlText(html);
+  assert.match(body,/!\[Map\]\(https:\/\/substack-post-media\.s3\.amazonaws\.com\/public\/images\/abc\.png\)/);
+  const feed=parseFeed(`<rss><channel><generator>Substack</generator><item><guid>9</guid><title>Farm</title><link>https://www.blog.farmapper.com/p/x</link><content:encoded><![CDATA[${html}]]></content:encoded></item></channel></rss>`,"https://www.blog.farmapper.com/feed");
+  assert.equal(feed[0].source.platform,"Substack");
 });
 test("ZIP reads exported archive once, rather than duplicating format variants",async()=>{
   const zip=new JSZip();zip.file("writes-library.json",JSON.stringify({works:[{...original,id:"x"}]}));zip.file("piece/writing.txt",original.body);zip.file("piece/read.html","<p>Duplicate</p>");zip.file("piece/revisions/1.json",JSON.stringify(original));

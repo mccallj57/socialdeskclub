@@ -109,7 +109,7 @@ export async function handler(event){
       if(!auth)return {statusCode:401,headers,body:JSON.stringify({error:"Sign in with your Reads member account."})};
       return {statusCode:200,headers,body:JSON.stringify({user:auth.user,preview:false})};
     }
-    const result=await service.route(auth?.owner,method,path,data);
+    const result=await service.route(auth?.owner,method,path,data,auth?.user||null);
     return {statusCode:200,headers,body:JSON.stringify(result)};
   }catch(e){
     const status=e.name==="ZodError"?400:e.status||500;

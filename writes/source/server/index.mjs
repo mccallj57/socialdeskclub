@@ -36,7 +36,7 @@ app.use("/api",async(req,res,next)=>{
       if(++r.n>10) return res.status(429).json({error:"Please wait a minute before another import."});
       rate.set(owner,r);
     }
-    res.json(await service.route(owner,req.method,"/api"+req.path,req.body));
+    res.json(await service.route(owner,req.method,"/api"+req.path,req.body,{display_name:"Your preview desk"}));
   } catch(e){next(e);}
 });
 app.use(express.static("dist/public"));
