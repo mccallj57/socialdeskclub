@@ -5,12 +5,26 @@ import ipaddr from "ipaddr.js";
 import { XMLParser } from "fast-xml-parser";
 import { parseHTML } from "linkedom";
 import yauzl from "yauzl";
+import { firstImageUrl, normalizeCanonicalUrl } from "../shared/manuscript.mjs";
+export { firstImageUrl, normalizeCanonicalUrl };
 
 export function fail(message, status = 400) { const e = new Error(message); e.status = status; throw e; }
 export const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 const bytes = value => Buffer.byteLength(value, "utf8");
 export function publicAddress(address) {
   try { return ipaddr.process(address).range() === "unicast"; } catch { return false; }
+}
+export function stableImportKey({ url, postId, title, publishedAt, fallback }) {
+  const canonical = normalizeCanonicalUrl(url);
+  if (canonical) return "url|" + canonical;
+  const id = String(postId || "").trim();
+  if (id) return "substack|" + (id.split(".")[0] || id);
+  const stamped = String(publishedAt || "").slice(0, 10);
+  if (title && stamped) return "title-date|" + String(title).trim().toLowerCase().replace(/\s+/g, " ") + "|" + stamped;
+  return fallback || ("body|" + hash(String(title || "") + "|" + stamped));
+}
+export function workImportId(sourceKey) {
+  return "import-" + hash(sourceKey).slice(0, 32);
 }
 function barePath(pathname) {
   const path = (pathname || "/").replace(/\/+$/, "") || "/";
@@ -241,7 +255,30 @@ function candidate(data) {
   if (typeof data.body !== "string" || bytes(data.body) > 120000) fail("One writing exceeds the 120 KB text limit. Split it into smaller pieces.");
   const original = String(data.original ?? data.body);
   if (bytes(original) > 160000) fail("One source exceeds the 160 KB original-source limit. Import it as plain text.");
-  return { title: String(data.title || "Untitled").slice(0, 180), author: String(data.author || "").slice(0, 120), kind: ["poetry","story","essay","other"].includes(data.kind) ? data.kind : "essay", body: data.body, collection: String(data.collection || "").slice(0, 80), theme: ["forest","clay","linen","night"].includes(data.theme) ? data.theme : "linen", ...(data.layout?{layout:data.layout}:{}),versionName:typeof data.versionName==="string"?data.versionName.slice(0,80):"", source: { key: String(data.key || hash(data.body)), platform: data.platform || "File", url: data.url || "", fetchedAt: new Date().toISOString(), original, hash: hash(data.body) } };
+  const url = normalizeCanonicalUrl(data.url) || String(data.url || "");
+  const key = String(data.key || stableImportKey({ url, postId: data.postId, title: data.title, publishedAt: data.publishedAt, fallback: hash(data.body) }));
+  const coverUrl = normalizeCanonicalUrl(data.coverUrl) || firstImageUrl(data.body) || "";
+  return {
+    title: String(data.title || "Untitled").slice(0, 180),
+    author: String(data.author || "").slice(0, 120),
+    kind: ["poetry","story","essay","other"].includes(data.kind) ? data.kind : "essay",
+    body: data.body,
+    collection: String(data.collection || "").slice(0, 80),
+    theme: ["forest","clay","linen","night"].includes(data.theme) ? data.theme : "linen",
+    coverUrl,
+    ...(data.layout?{layout:data.layout}:{}),
+    versionName:typeof data.versionName==="string"?data.versionName.slice(0,80):"",
+    source: {
+      key,
+      platform: data.platform || "File",
+      url,
+      postId: data.postId ? String(data.postId) : "",
+      publishedAt: data.publishedAt ? String(data.publishedAt) : "",
+      fetchedAt: new Date().toISOString(),
+      original,
+      hash: hash(data.body),
+    },
+  };
 }
 export function googleDraft(address,name,text) {
   let url;
@@ -266,7 +303,19 @@ export function parseFeed(xml, url) {
     if (Array.isArray(link)) link = link.find(l => l["@_rel"] === "alternate") || link[0];
     const href = typeof link === "object" ? link?.["@_href"] : link;
     const content = string(item["content:encoded"] || item.content || item.description || item.summary);
-    return candidate({ title: htmlText(string(item.title)), author: string(item["dc:creator"]) || string(item.author?.name) || string(item.author), body: htmlText(content), original: content, url: /^https?:\/\//i.test(href) ? href : "", key: hash(url + "|" + (string(item.guid || item.id) || href || string(item.title))), platform });
+    const body = htmlText(content);
+    const postUrl = /^https?:\/\//i.test(href) ? href : (/^https?:\/\//i.test(string(item.guid || item.id)) ? string(item.guid || item.id) : "");
+    return candidate({
+      title: htmlText(string(item.title)),
+      author: string(item["dc:creator"]) || string(item.author?.name) || string(item.author),
+      body,
+      original: content,
+      url: postUrl,
+      publishedAt: string(item.pubDate || item.published || item.updated),
+      postId: string(item.guid || item.id),
+      key: stableImportKey({ url: postUrl, postId: string(item.guid || item.id), title: htmlText(string(item.title)), publishedAt: string(item.pubDate || item.published || item.updated), fallback: hash(url + "|" + (string(item.guid || item.id) || href || string(item.title))) }),
+      platform,
+    });
   });
 }
 export function parseFile(name, text) {
@@ -287,9 +336,95 @@ export function parseFile(name, text) {
   }
   return [candidate({ title, body, original, key: hash("file|" + name + "|" + text), platform: "File" })];
 }
-export async function parseZip(base64) {
+export function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", i = 0, inQuotes = false;
+  const pushField = () => { row.push(field); field = ""; };
+  const pushRow = () => { if (row.some(c => c.length)) rows.push(row); row = []; };
+  const input = String(text || "").replace(/^\uFEFF/, "");
+  while (i < input.length) {
+    const ch = input[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (input[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQuotes = false; i += 1; continue;
+      }
+      field += ch; i += 1; continue;
+    }
+    if (ch === '"') { inQuotes = true; i += 1; continue; }
+    if (ch === ",") { pushField(); i += 1; continue; }
+    if (ch === "\n") { pushField(); pushRow(); i += 1; continue; }
+    if (ch === "\r") { i += 1; continue; }
+    field += ch; i += 1;
+  }
+  pushField(); pushRow();
+  if (!rows.length) return [];
+  const headers = rows[0].map(h => h.trim());
+  return rows.slice(1).map(cells => {
+    const obj = {};
+    headers.forEach((h, idx) => { obj[h] = cells[idx] ?? ""; });
+    return obj;
+  });
+}
+export function publicationPostUrl(base, postId) {
+  const root = normalizeCanonicalUrl(base) || String(base || "").replace(/\/+$/, "");
+  if (!root) return "";
+  const raw = String(postId || "");
+  const slug = raw.includes(".") ? raw.slice(raw.indexOf(".") + 1) : "";
+  if (!slug) return "";
+  try {
+    const url = new URL(root);
+    url.pathname = "/p/" + slug;
+    return normalizeCanonicalUrl(url.toString());
+  } catch {
+    return "";
+  }
+}
+export function parseSubstackExport(files, { publicationUrl = "", defaultAuthor = "" } = {}) {
+  const csvFile = files.find(f => /(^|\/)posts\.csv$/i.test(f.name));
+  if (!csvFile) fail("This does not look like a Substack export (missing posts.csv).");
+  const rows = parseCsv(csvFile.text);
+  if (!rows.length) fail("The Substack export posts.csv had no rows.");
+  const htmlById = new Map();
+  for (const file of files) {
+    const match = file.name.match(/(?:^|\/)posts\/([^/]+)\.html?$/i);
+    if (match) htmlById.set(match[1], file.text);
+  }
+  const out = [];
+  for (const row of rows) {
+    const postId = row.post_id || row.id || "";
+    const published = /^(true|1|yes)$/i.test(String(row.is_published || "").trim());
+    if (!published && String(row.is_published || "") !== "") continue;
+    const html = htmlById.get(postId) || htmlById.get(String(postId).split(".")[0]) || "";
+    if (!html.trim()) continue;
+    const title = String(row.title || "").trim() || postId;
+    const body = htmlText(html);
+    if (!body.trim()) continue;
+    const url = publicationPostUrl(publicationUrl, postId);
+    const author = String(row.author || row.writer || defaultAuthor || "").trim();
+    out.push(candidate({
+      title,
+      author,
+      body,
+      original: html,
+      url,
+      postId,
+      publishedAt: row.post_date || row.date || "",
+      collection: String(row.type || "Substack export").slice(0, 80),
+      platform: "Substack export",
+      kind: "essay",
+    }));
+    if (out.length >= 200) break;
+  }
+  if (!out.length) fail("No published posts with HTML bodies were found in this Substack export.");
+  return out;
+}
+export async function parseZip(base64, options = {}) {
   const buffer = Buffer.from(base64, "base64");
-  if (buffer.length > 3_000_000) fail("ZIP archives must be smaller than 3 MB.");
+  const maxZip = options.substack ? 25_000_000 : 3_000_000;
+  const maxExpanded = options.substack ? 80_000_000 : 12_000_000;
+  const maxFile = options.substack ? 5_000_000 : 3_000_000;
+  if (buffer.length > maxZip) fail(options.substack ? "Substack export ZIPs must be smaller than 25 MB." : "ZIP archives must be smaller than 3 MB.");
   const files = [];
   await new Promise((resolve, reject) => yauzl.fromBuffer(buffer, { lazyEntries: true, validateEntrySizes: true }, (error, zip) => {
     if (error) return reject(new Error("This ZIP archive could not be opened."));
@@ -297,13 +432,16 @@ export async function parseZip(base64) {
     const stop = error => { if (!stopped) { stopped = true; zip.close(); reject(error); } };
     zip.on("error", stop); zip.on("end", resolve);
     zip.on("entry", entry => {
-      if (++count > 500 || entry.uncompressedSize > 3_000_000 || (total += entry.uncompressedSize) > 12_000_000) return stop(new Error("The expanded archive is too large. Import up to 40 smaller writings."));
+      if (++count > 5000 || entry.uncompressedSize > maxFile || (total += entry.uncompressedSize) > maxExpanded) return stop(new Error("The expanded archive is too large."));
       if (entry.fileName.includes("..") || entry.fileName.startsWith("/") || entry.fileName.includes("\\")) return stop(new Error("Unsafe file path in archive."));
-      if (!/\.(html?|txt|md|json)$/i.test(entry.fileName) || /(^|\/)(__MACOSX|revisions|originals)\//.test(entry.fileName)) return zip.readEntry();
+      if (!/\.(html?|txt|md|json|csv)$/i.test(entry.fileName) || /(^|\/)(__MACOSX|revisions|originals)\//.test(entry.fileName)) return zip.readEntry();
+      // Skip huge email open/deliver CSVs in Substack exports
+      if (/(^|\/)posts\/.*\.(opens|delivers)\.csv$/i.test(entry.fileName)) return zip.readEntry();
+      if (/email_list|subscribers/i.test(entry.fileName) && /\.csv$/i.test(entry.fileName)) return zip.readEntry();
       zip.openReadStream(entry, (err, stream) => {
         if (err) return stop(err);
         const chunks = []; let size = 0;
-        stream.on("data", c => { size += c.length; if (size > 3_000_000) { stream.destroy(); stop(new Error("An expanded file is too large.")); } else chunks.push(c); });
+        stream.on("data", c => { size += c.length; if (size > maxFile) { stream.destroy(); stop(new Error("An expanded file is too large.")); } else chunks.push(c); });
         stream.on("error", stop);
         stream.on("end", () => { if (!stopped) { files.push({ name: entry.fileName, text: Buffer.concat(chunks).toString("utf8") }); zip.readEntry(); } });
       });
@@ -312,7 +450,13 @@ export async function parseZip(base64) {
   }));
   const backup = files.find(f => /(^|\/)writes-library\.json$/i.test(f.name));
   if (backup) return parseFile(backup.name, backup.text);
-  const writings = files.filter(f => !/(^|\/)(index|readme|manifest)\./i.test(f.name)).slice(0, 40).flatMap(f => parseFile(f.name, f.text));
+  if (files.some(f => /(^|\/)posts\.csv$/i.test(f.name))) {
+    return parseSubstackExport(files, {
+      publicationUrl: options.publicationUrl || "",
+      defaultAuthor: options.defaultAuthor || "",
+    });
+  }
+  const writings = files.filter(f => !/(^|\/)(index|readme|manifest)\./i.test(f.name) && !/\.csv$/i.test(f.name)).slice(0, 40).flatMap(f => parseFile(f.name, f.text));
   if (!writings.length) fail("No supported writing files were found in this archive.");
   return writings.slice(0, 40);
 }

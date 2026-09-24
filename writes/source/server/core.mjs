@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import { z } from "zod";
-import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, filterCandidatesByAuthor } from "./imports.mjs";
+import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, filterCandidatesByAuthor, workImportId, normalizeCanonicalUrl } from "./imports.mjs";
 import { DEFAULT_LAYOUT } from "../shared/poetry.mjs";
+import { firstImageUrl } from "../shared/manuscript.mjs";
 
 const input = z.object({
   title: z.string().trim().min(1, "Give this writing a title.").max(180),
@@ -10,6 +11,7 @@ const input = z.object({
   kind: z.enum(["poetry","story","essay","other"]).default("poetry"),
   collection: z.string().max(80).default(""),
   theme: z.enum(["forest","clay","linen","night"]).default("forest"),
+  coverUrl: z.string().max(2000).default(""),
   archived: z.boolean().default(false),
   versionName: z.string().trim().max(80).default(""),
   layout: z.object({
@@ -20,8 +22,13 @@ const input = z.object({
   }).default(DEFAULT_LAYOUT),
 });
 const now = () => new Date().toISOString();
-const metadata = w => ({ id:w.id, title:w.title, author:w.author, kind:w.kind, collection:w.collection, theme:w.theme, archived:w.archived, version:w.version, updatedAt:w.updatedAt, example:w.example, shared:!!w.shareToken, platform:w.source?.platform, words:w.body.trim().split(/\s+/).filter(Boolean).length });
-const publicCopy = w => ({ id:w.id,title:w.title,author:w.author,kind:w.kind,body:w.body,theme:w.theme,collection:w.collection,layout:w.layout,version:w.version,publishedAt:now() });
+const metadata = w => ({
+  id:w.id, title:w.title, author:w.author, kind:w.kind, collection:w.collection, theme:w.theme,
+  coverUrl: w.coverUrl || firstImageUrl(w.body) || "",
+  archived:w.archived, version:w.version, updatedAt:w.updatedAt, example:w.example, shared:!!w.shareToken,
+  platform:w.source?.platform, words:w.body.trim().split(/\s+/).filter(Boolean).length,
+});
+const publicCopy = w => ({ id:w.id,title:w.title,author:w.author,kind:w.kind,body:w.body,theme:w.theme,collection:w.collection,layout:w.layout,coverUrl:w.coverUrl||firstImageUrl(w.body)||"",version:w.version,publishedAt:now() });
 const exportCopy = w => { const {shareToken,...copy} = w; return copy; };
 export const EXAMPLES = [
   { title:"The space between",kind:"poetry",theme:"forest",collection:"Small observations",author:"A Writes example",body:"Not every silence\nis an empty room.\n\nSome are a window\nleft open\n    for the rain.\n\n[[page]]\n\nI am learning\nto leave a little space\nbetween the things I know.\n\nEnough for a seed.\nEnough for a question.\nEnough for you.",example:true },
@@ -44,12 +51,40 @@ export class Writes {
   }
   async save(owner, fields, old = null, extra = {}) {
     const validated = input.parse(fields), stamp = now();
-    const w = { ...old, ...validated, ...extra, id:old?.id || extra.id || crypto.randomUUID(),createdAt:old?.createdAt || stamp,updatedAt:stamp,version:(old?.version||0)+1 };
+    const coverUrl = normalizeCanonicalUrl(validated.coverUrl) || normalizeCanonicalUrl(extra.coverUrl) || firstImageUrl(validated.body) || old?.coverUrl || "";
+    const w = { ...old, ...validated, ...extra, coverUrl, id:old?.id || extra.id || crypto.randomUUID(),createdAt:old?.createdAt || stamp,updatedAt:stamp,version:(old?.version||0)+1 };
     if (Buffer.byteLength(JSON.stringify(w)) > 300000) fail("This piece and its source are too large to save together. Import a smaller plain-text section.");
     const ops = [{pk:owner,sk:"work#"+w.id,value:w,expected:old?.version||0}];
     if (old) ops.push({pk:owner,sk:`revision#${old.id}#${String(old.version).padStart(8,"0")}`,value:exportCopy(old),expected:0});
     await this.store.commit(ops);
     return w;
+  }
+  async findExistingImport(owner, candidate) {
+    const primaryId = workImportId(candidate.source.key);
+    const primary = await this.store.get(owner, "work#" + primaryId);
+    if (primary) return { work: primary, id: primary.id };
+
+    const works = await this.store.list(owner, "work#");
+    const wantUrl = normalizeCanonicalUrl(candidate.source.url);
+    const wantPostId = String(candidate.source.postId || "").split(".")[0];
+    const wantTitleDate = candidate.title && candidate.source.publishedAt
+      ? String(candidate.title).trim().toLowerCase().replace(/\s+/g, " ") + "|" + String(candidate.source.publishedAt).slice(0, 10)
+      : "";
+
+    for (const work of works) {
+      const haveUrl = normalizeCanonicalUrl(work.source?.url);
+      if (wantUrl && haveUrl && wantUrl === haveUrl) return { work, id: work.id };
+      const havePostId = String(work.source?.postId || "").split(".")[0];
+      if (wantPostId && havePostId && wantPostId === havePostId) return { work, id: work.id };
+      // Older RSS imports used hash(feed|guid) keys; recover via URL equality above.
+      // Also match prior url| keys stored on source.key
+      if (wantUrl && work.source?.key === "url|" + wantUrl) return { work, id: work.id };
+      if (wantTitleDate && work.source?.publishedAt) {
+        const have = String(work.title || "").trim().toLowerCase().replace(/\s+/g, " ") + "|" + String(work.source.publishedAt).slice(0, 10);
+        if (have === wantTitleDate) return { work, id: work.id };
+      }
+    }
+    return { work: null, id: primaryId };
   }
   async route(owner, method, path, data = {}, actor = null) {
     if (path.startsWith("/api/public/") && method === "GET") {
@@ -154,28 +189,57 @@ export class Writes {
         } else if (!authorsOnly) {
           feedNote += "Importing every author on this publication (opt-in). ";
         }
-      } else if (data.name?.toLowerCase().endsWith(".zip")) candidates = await parseZip(data.base64 || "");
-      else candidates = parseFile(data.name || "Pasted writing.txt",data.text || "");
+      } else if (data.name?.toLowerCase().endsWith(".zip")) {
+        const defaultAuthor = actor?.display_name || actor?.displayName || actor?.username || "";
+        candidates = await parseZip(data.base64 || "", {
+          substack: true,
+          publicationUrl: data.publicationUrl || "",
+          defaultAuthor,
+        });
+        const authorsOnly = data.includeAllAuthors !== true;
+        const aliases = collectAuthorAliases(actor || {}, {}, owner, typeof data.authorFilter === "string" ? data.authorFilter : "");
+        // Export ZIPs are owned by the member; blank bylines default to the member for author-only mode.
+        if (authorsOnly && aliases.length) {
+          candidates = candidates.map(c => c.author ? c : { ...c, author: defaultAuthor || aliases[0] });
+          const filtered = filterCandidatesByAuthor(candidates, aliases, { authorsOnly: true });
+          feedNote = `Substack export. Author filter on: showing posts matching ${aliases.join(" / ")}. Skipped ${filtered.skipped} by other authors. `;
+          candidates = filtered.kept;
+          if (!candidates.length) fail("No posts in this export matched your author identity.");
+        } else {
+          feedNote = "Substack export. ";
+        }
+        source = { id: hash("substack-export|" + (data.publicationUrl || data.name || "zip")).slice(0, 24), url: data.publicationUrl || "", updatedAt: now(), version: 1 };
+      } else candidates = parseFile(data.name || "Pasted writing.txt",data.text || "");
       const jobId = crypto.randomUUID(), expiresAt = Math.floor(Date.now()/1000)+1800;
       const previews = [];
       for (const [index,c] of candidates.entries()) {
-        const id = "import-"+hash(c.source.key).slice(0,32);
-        const existing = await this.store.get(owner,"work#"+id);
+        const found = await this.findExistingImport(owner, c);
+        const existing = found.work;
+        const id = found.id;
         const status = !existing ? "new" : existing.source?.hash === c.source.hash ? "unchanged" : "changed";
-        const entry = {...c,id,index,status,existingVersion:existing?.version||0,expiresAt,version:1};
+        const entry = {
+          ...c,
+          id,
+          index,
+          status,
+          existingVersion: existing?.version || 0,
+          expiresAt,
+          version: 1,
+          coverUrl: c.coverUrl || firstImageUrl(c.body) || existing?.coverUrl || "",
+        };
         if (Buffer.byteLength(JSON.stringify(entry)) > 300000) fail("An imported piece is too large. Import a smaller plain-text section.");
         await this.store.commit([{pk:owner,sk:`job#${jobId}#${index}`,value:entry,expected:0}]);
-        previews.push({index,title:c.title,author:c.author,body:c.body,status,platform:c.source.platform,existingBody:existing?.body});
+        previews.push({index,title:c.title,author:c.author,body:c.body,status,platform:c.source.platform,existingBody:existing?.body,coverUrl:entry.coverUrl});
       }
       await this.store.commit([{pk:owner,sk:"job#"+jobId,value:{expiresAt,count:candidates.length,source,version:1},expected:0}]);
-      return {jobId,candidates:previews,warning:data.googleDocUrl?"This is an independent text copy, not a live Google connection. Re-import using the same document address to review a later draft. Google’s revision history, comments, formatting, and media are not imported.":feedNote+"RSS may include only recent posts or excerpts. HTTPS images from the feed are kept as linked addresses (for example Medium or Substack CDNs). Image files are not downloaded into Writes storage. Audio and video are still skipped. Review the result against your original."};
+      return {jobId,candidates:previews,warning:data.googleDocUrl?"This is an independent text copy, not a live Google connection. Re-import using the same document address to review a later draft. Google’s revision history, comments, formatting, and media are not imported.":feedNote+"Duplicates match by canonical URL, Substack post id, or title+date against your library (including prior RSS/Medium imports). HTTPS images stay linked; ZIP exports do not include binary media files. Review the result against your original."};
     }
     if (path === "/api/import/commit" && method === "POST") {
       if (data.rights !== true) fail("Confirm that you own this writing or have permission to copy it.");
       const job = await this.store.get(owner,"job#"+data.jobId);
       if (!job || job.expiresAt < Date.now()/1000) fail("This import preview expired. Preview the source again.");
       const selected = [...new Set(data.selected || [])];
-      if (selected.length > 40 || !selected.every(x=>Number.isInteger(x)&&x>=0&&x<job.count)) fail("Invalid import selection.");
+      if (selected.length > 200 || !selected.every(x=>Number.isInteger(x)&&x>=0&&x<job.count)) fail("Invalid import selection.");
       if ((await this.store.list(owner,"work#")).length + selected.length > 500) fail("This workspace is limited to 500 writings.");
       const results = [];
       for (const index of selected) {
@@ -185,7 +249,7 @@ export class Writes {
         if ((old?.version||0) !== c.existingVersion) { results.push({title:c.title,status:"conflict"}); continue; }
         if (old && !(data.approvedChanges||[]).includes(index)) { results.push({title:c.title,status:"needs-review"}); continue; }
         try {
-          await this.save(owner,{...c,...(old?{kind:old.kind,collection:old.collection,theme:old.theme,layout:old.layout,archived:old.archived}:{archived:false}),versionName:""},old,{id:c.id,source:c.source,example:false});
+          await this.save(owner,{...c,...(old?{kind:old.kind,collection:old.collection,theme:old.theme,layout:old.layout,archived:old.archived}:{archived:false}),versionName:"",coverUrl:c.coverUrl||old?.coverUrl||""},old,{id:c.id,source:c.source,example:false,coverUrl:c.coverUrl||old?.coverUrl||""});
           results.push({title:c.title,status:old?"updated":"imported"});
         } catch(e) { if(e.status===409) results.push({title:c.title,status:"conflict"}); else throw e; }
       }

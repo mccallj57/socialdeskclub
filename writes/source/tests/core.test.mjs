@@ -133,6 +133,30 @@ test("import preview defaults to author-only posts from multi-author feeds",asyn
   const all=await app.route("member#james","POST","/api/import/preview",{url:"https://www.blog.farmapper.com/",includeAllAuthors:true},{display_name:"James McCall",username:"james"});
   assert.equal(all.candidates.length,2);
 });
+test("Substack export ZIP parses posts and dedupes against prior RSS by URL",async()=>{
+  const html='<p>Hello</p><img alt="Hero" src="https://substack-post-media.s3.amazonaws.com/public/images/hero.png"><p>More</p>';
+  const csv='post_id,post_date,is_published,type,title,subtitle,audience\n190318527.we-named-a-mapping-tool-after-a-potato,2023-01-01T00:00:00.000Z,true,newsletter,We Named a Mapping Tool After a Potato.,,everyone\n';
+  const zip=new JSZip();
+  zip.file("posts.csv",csv);
+  zip.file("posts/190318527.we-named-a-mapping-tool-after-a-potato.html",html);
+  const base64=await zip.generateAsync({type:"base64"});
+  const fromZip=await parseZip(base64,{substack:true,publicationUrl:"https://www.blog.farmapper.com/",defaultAuthor:"James McCall"});
+  assert.equal(fromZip.length,1);
+  assert.equal(fromZip[0].title,"We Named a Mapping Tool After a Potato.");
+  assert.equal(fromZip[0].source.url,"https://www.blog.farmapper.com/p/we-named-a-mapping-tool-after-a-potato");
+  assert.match(fromZip[0].coverUrl,/hero\.png/);
+  assert.equal(fromZip[0].source.key,"url|https://www.blog.farmapper.com/p/we-named-a-mapping-tool-after-a-potato");
+
+  const feedXml=`<rss><channel><generator>Substack</generator><item><guid>https://www.blog.farmapper.com/p/we-named-a-mapping-tool-after-a-potato</guid><title>We Named a Mapping Tool After a Potato.</title><link>https://www.blog.farmapper.com/p/we-named-a-mapping-tool-after-a-potato</link><dc:creator><![CDATA[James McCall]]></dc:creator><content:encoded><![CDATA[${html}]]></content:encoded></item></channel></rss>`;
+  const {store}=setup();
+  const app=new Writes(store,async()=>({url:"https://www.blog.farmapper.com/feed",text:feedXml}));
+  const rssJob=await app.route("member#james","POST","/api/import/preview",{url:"https://www.blog.farmapper.com/"},{display_name:"James McCall",username:"james"});
+  await app.route("member#james","POST","/api/import/commit",{jobId:rssJob.jobId,selected:[0],rights:true},{display_name:"James McCall",username:"james"});
+  const zipJob=await app.route("member#james","POST","/api/import/preview",{name:"export.zip",base64,publicationUrl:"https://www.blog.farmapper.com/"},{display_name:"James McCall",username:"james"});
+  assert.equal(zipJob.candidates.length,1);
+  assert.equal(zipJob.candidates[0].status,"unchanged");
+  assert.match(zipJob.warning,/Duplicates match/i);
+});
 test("HTML import is inert text and preserves explicit poetry spacing",()=>{
   assert.equal(htmlText("<pre>  one\n\n    two</pre>"),"  one\n\n    two");
   const result=htmlText('<script>alert(1)</script><style>bad</style><p>First<br>second</p><p>Third</p>');

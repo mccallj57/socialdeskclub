@@ -1,6 +1,28 @@
 /** Markdown image markers written by HTML→text import for HTTPS feed images. */
 export const IMAGE_MD_RE = /!\[([^\]]*)\]\((https:\/\/[^)\s]+)\)/g;
 
+export function firstImageUrl(text = "") {
+  const match = IMAGE_MD_RE.exec(String(text));
+  IMAGE_MD_RE.lastIndex = 0;
+  return match ? match[2] : "";
+}
+
+export function normalizeCanonicalUrl(input) {
+  if (!input || typeof input !== "string") return "";
+  try {
+    const url = new URL(input.trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return "";
+    url.protocol = "https:";
+    url.hash = "";
+    url.search = "";
+    url.hostname = url.hostname.toLowerCase();
+    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
 export function splitManuscript(text = "") {
   const parts = [];
   let last = 0;
