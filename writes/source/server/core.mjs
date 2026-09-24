@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { z } from "zod";
-import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft } from "./imports.mjs";
+import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, filterCandidatesByAuthor } from "./imports.mjs";
 import { DEFAULT_LAYOUT } from "../shared/poetry.mjs";
 
 const input = z.object({
@@ -51,7 +51,7 @@ export class Writes {
     await this.store.commit(ops);
     return w;
   }
-  async route(owner, method, path, data = {}) {
+  async route(owner, method, path, data = {}, actor = null) {
     if (path.startsWith("/api/public/") && method === "GET") {
       const token = path.split("/").pop();
       if (!/^[a-zA-Z0-9_-]{32}$/.test(token)) fail("This shared writing is unavailable.",404);
@@ -138,9 +138,22 @@ export class Writes {
           if (merged.length >= 40) break;
         }
         if (!merged.length) fail("No articles were found across those publication feeds. Try a single publication /feed URL.");
-        candidates = merged;
+        const authorsOnly = data.includeAllAuthors !== true;
+        const aliases = collectAuthorAliases(actor || {}, resolved, owner, typeof data.authorFilter === "string" ? data.authorFilter : "");
+        const filtered = filterCandidatesByAuthor(merged, aliases, { authorsOnly });
+        if (filtered.filtered && !filtered.kept.length) {
+          fail(`No posts matched your author identity (${aliases.join(", ") || "unknown"}). ${filtered.skipped} post${filtered.skipped===1?"":"s"} by other authors were hidden. Enable “Import every author on this publication” only if you intend to copy co-authors’ writing.`);
+        }
+        candidates = filtered.kept;
         source = {id:hash(resolved.label).slice(0,24),url:resolved.label,updatedAt:now(),version:1};
         if (resolved.handle) feedNote = `Loaded public publications from @${resolved.handle}. `;
+        if (filtered.filtered) {
+          feedNote += `Author filter on: showing posts matching ${aliases.join(" / ")}. Skipped ${filtered.skipped} by other authors. `;
+        } else if (authorsOnly && !aliases.length) {
+          feedNote += "Author filter idle (no member display name/username to match). Showing all posts from the feed. ";
+        } else if (!authorsOnly) {
+          feedNote += "Importing every author on this publication (opt-in). ";
+        }
       } else if (data.name?.toLowerCase().endsWith(".zip")) candidates = await parseZip(data.base64 || "");
       else candidates = parseFile(data.name || "Pasted writing.txt",data.text || "");
       const jobId = crypto.randomUUID(), expiresAt = Math.floor(Date.now()/1000)+1800;

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import JSZip from "jszip";
 import { SQLiteStore, Conflict } from "../server/storage.mjs";
 import { Writes } from "../server/core.mjs";
-import { publicAddress, feedUrl, htmlText, parseFeed, parseFile, parseZip, safeFetch, resolveFeedUrls, publicationFeedUrl, substackProfileHandle } from "../server/imports.mjs";
+import { publicAddress, feedUrl, htmlText, parseFeed, parseFile, parseZip, safeFetch, resolveFeedUrls, publicationFeedUrl, substackProfileHandle, collectAuthorAliases, authorMatches, filterCandidatesByAuthor } from "../server/imports.mjs";
 const setup = () => { const store=new SQLiteStore(":memory:");return {store,app:new Writes(store)}; };
 const original={title:"A poem",body:"  First line\nsecond line\n\n    a stanza.\n\n[[page]]\n\nLast line",kind:"poetry",author:"Author"};
 test("poetry survives saving, editing, history and portable JSON",async()=>{
@@ -85,6 +85,7 @@ test("private, loopback, link-local and mapped IP addresses are blocked",async()
 });
 test("Substack profile paste expands to public admin publication feeds",async()=>{
   const profile={
+    name:"James McCall",
     publicationUsers:[
       {public:true,role:"admin",is_primary:false,publication:{name:"Farmapper",subdomain:"farmapper",custom_domain:"www.blog.farmapper.com"}},
       {public:true,role:"admin",is_primary:true,publication:{name:"Maisa Space",subdomain:"maisaspace",custom_domain:"blog.maisaspace.org"}},
@@ -98,6 +99,39 @@ test("Substack profile paste expands to public admin publication feeds",async()=
     "https://www.blog.farmapper.com/feed",
   ]);
   assert.equal(resolved.handle,"mccallios");
+  assert.equal(resolved.profileName,"James McCall");
+});
+test("author filter keeps only matching bylines",()=>{
+  const aliases=collectAuthorAliases({display_name:"James McCall",username:"james"},{handle:"mccallios",profileName:"James McCall"},"member#james");
+  assert.ok(aliases.includes("james mccall"));
+  assert.ok(aliases.includes("james"));
+  assert.ok(aliases.includes("mccallios"));
+  assert.equal(authorMatches("James McCall",aliases),true);
+  assert.equal(authorMatches("Samia",aliases),false);
+  assert.equal(authorMatches("Anthony Glukhov",aliases),false);
+  const {kept,skipped,filtered}=filterCandidatesByAuthor(
+    [{author:"James McCall",title:"A"},{author:"Samia",title:"B"},{author:"James McCall",title:"C"}],
+    aliases,
+    {authorsOnly:true}
+  );
+  assert.equal(filtered,true);
+  assert.equal(kept.length,2);
+  assert.equal(skipped,1);
+});
+test("import preview defaults to author-only posts from multi-author feeds",async()=>{
+  const multi=`<rss><channel><generator>Substack</generator>
+    <item><guid>1</guid><title>Mine</title><link>https://www.blog.farmapper.com/p/1</link><dc:creator><![CDATA[James McCall]]></dc:creator><content:encoded><![CDATA[<p>Hi</p>]]></content:encoded></item>
+    <item><guid>2</guid><title>Theirs</title><link>https://blog.maisaspace.org/p/2</link><dc:creator><![CDATA[Samia]]></dc:creator><content:encoded><![CDATA[<p>Yo</p>]]></content:encoded></item>
+  </channel></rss>`;
+  const {store}=setup();
+  const app=new Writes(store,async()=>({url:"https://www.blog.farmapper.com/feed",text:multi}));
+  const job=await app.route("member#james","POST","/api/import/preview",{url:"https://www.blog.farmapper.com/"},{display_name:"James McCall",username:"james"});
+  assert.equal(job.candidates.length,1);
+  assert.equal(job.candidates[0].title,"Mine");
+  assert.equal(job.candidates[0].author,"James McCall");
+  assert.match(job.warning,/Author filter on/i);
+  const all=await app.route("member#james","POST","/api/import/preview",{url:"https://www.blog.farmapper.com/",includeAllAuthors:true},{display_name:"James McCall",username:"james"});
+  assert.equal(all.candidates.length,2);
 });
 test("HTML import is inert text and preserves explicit poetry spacing",()=>{
   assert.equal(htmlText("<pre>  one\n\n    two</pre>"),"  one\n\n    two");

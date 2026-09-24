@@ -70,10 +70,68 @@ export async function resolveFeedUrls(input, fetchJson = defaultJsonFetch) {
       feeds.push(feed);
     }
     if (!feeds.length) fail("This Substack profile has no public publications with RSS feeds. Paste a publication homepage or /feed URL instead.");
-    return { urls: feeds, label: `https://substack.com/@${handle}`, handle };
+    return {
+      urls: feeds,
+      label: `https://substack.com/@${handle}`,
+      handle,
+      profileName: typeof profile?.name === "string" ? profile.name.trim() : "",
+    };
   }
   const url = feedUrl(input);
   return { urls: [url], label: url };
+}
+/** Normalize bylines / handles for comparison. */
+export function normalizeAuthor(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/^@/, "")
+    .replace(/[_./-]+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+const IGNORE_ALIAS = new Set(["", "your preview desk", "preview", "you", "unknown", "anonymous"]);
+/** Build match aliases from Reads member + optional Substack profile. */
+export function collectAuthorAliases(actor = {}, resolved = {}, owner = "", extra = "") {
+  const raw = [
+    actor.display_name,
+    actor.displayName,
+    actor.username,
+    resolved.profileName,
+    resolved.handle,
+    extra,
+    typeof owner === "string" && owner.startsWith("member#") ? owner.slice(7) : "",
+  ];
+  const aliases = [];
+  const seen = new Set();
+  for (const value of raw) {
+    const normalized = normalizeAuthor(value);
+    if (!normalized || IGNORE_ALIAS.has(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    aliases.push(normalized);
+  }
+  return aliases;
+}
+export function authorMatches(itemAuthor, aliases) {
+  if (!aliases?.length) return true;
+  const author = normalizeAuthor(itemAuthor);
+  if (!author) return false;
+  const tokens = author.split(" ").filter(Boolean);
+  return aliases.some(alias => {
+    if (author === alias) return true;
+    if (tokens.includes(alias)) return true;
+    if (alias.includes(" ") && author.includes(alias)) return true;
+    return false;
+  });
+}
+export function filterCandidatesByAuthor(candidates, aliases, { authorsOnly = true } = {}) {
+  if (!authorsOnly || !aliases.length) {
+    return { kept: candidates, skipped: 0, aliases, filtered: false };
+  }
+  const kept = candidates.filter(c => authorMatches(c.author, aliases));
+  return { kept, skipped: candidates.length - kept.length, aliases, filtered: true };
 }
 async function defaultJsonFetch(url) {
   const host = new URL(url).hostname;
