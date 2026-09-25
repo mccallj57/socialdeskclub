@@ -37,7 +37,6 @@ const kinds = {poetry:"Poetry",story:"Stories (narrative / fiction)",essay:"Essa
 const kindHints = {poetry:"Verse and poems",story:"Narrative or fiction — rename the bibliography label to Fiction if you like",essay:"Nonfiction reflections and commentary",other:"Anything that doesn’t fit the others"};
 const countWords = text => text.trim().split(/\s+/).filter(Boolean).length;
 const dateLabel = date => { const d=new Date(date); return Number.isNaN(d.getTime())?"":d.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}); };
-const yearLabel = date => { const d=new Date(date); return Number.isNaN(d.getTime())?"":String(d.getFullYear()); };
 const dateInputValue = date => { const d=String(date||"").trim(); if(/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0,10); const t=new Date(d); return Number.isNaN(t.getTime())?"":t.toISOString().slice(0,10); };
 const esc = s => String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,65)||"untitled";
