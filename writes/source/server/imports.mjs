@@ -151,7 +151,9 @@ export function authorMatches(itemAuthor, aliases) {
 }
 /**
  * Gate each candidate for author-only import.
- * missing bylines are blocked unless soleAuthor (ZIP with no author column, sole-owned pub).
+ * Missing bylines → authorGate "unknown" (selectable with rights, not auto-checked)
+ * unless soleAuthor (ZIP with no author column, sole-owned pub) → allow.
+ * Other authors stay "block" / excluded.
  */
 export function gateCandidatesByAuthor(candidates, aliases, { authorsOnly = true, soleAuthor = false, defaultAuthor = "" } = {}) {
   if (!authorsOnly) {
@@ -188,14 +190,18 @@ export function gateCandidatesByAuthor(candidates, aliases, { authorsOnly = true
         };
       }
       skippedMissing += 1;
-      return { ...c, authorGate: "block", authorNote: "no byline in source" };
+      return {
+        ...c,
+        authorGate: "unknown",
+        authorNote: "no byline — check to include only if you own this post",
+      };
     }
     if (authorMatches(c.author, aliases)) {
       kept += 1;
       return { ...c, authorGate: "allow" };
     }
     skippedOther += 1;
-    return { ...c, authorGate: "block", authorNote: `by ${String(c.author).trim()}` };
+    return { ...c, authorGate: "block", authorNote: `by ${String(c.author).trim()} — locked (not your byline)` };
   });
   return { candidates: out, kept, skippedOther, skippedMissing, aliases, filtered: true };
 }
@@ -276,7 +282,7 @@ export async function safeGet(input, redirects = 0, { accept = "*/*", maxBytes =
   let url;
   try { url = new URL(String(input).trim()); } catch { fail("Invalid lookup address."); }
   if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443")) fail("Lookups must use public HTTPS without credentials.");
-  if (redirects > 3) fail("The lookup redirected too many times.");
+  if (redirects > 5) fail("The lookup redirected too many times.");
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const records = ipaddr.isValid(host) ? [{ address: host, family: ipaddr.parse(host).kind() === "ipv4" ? 4 : 6 }] : await dns.lookup(host, { all: true });
   if (!records.length || records.some(r => !publicAddress(r.address))) fail("That address is not a public internet host.");
@@ -312,19 +318,47 @@ export function slugFromPostId(postId) {
   const i = raw.indexOf(".");
   return i >= 0 ? raw.slice(i + 1) : raw;
 }
+export function numericPostId(postId) {
+  const raw = String(postId || "").trim();
+  const m = raw.match(/^(\d+)(?:\.|$)/);
+  return m ? m[1] : "";
+}
 export function slugFromUrl(url) {
   try {
     const path = new URL(url).pathname.replace(/\/+$/, "");
-    const m = path.match(/\/p\/([^/]+)$/);
-    return m ? m[1] : "";
+    const m = path.match(/\/p\/([^/]+)$/i) || path.match(/\/archive\/(?:[^/]+\/)*([^/]+)$/i);
+    if (!m) return "";
+    try { return decodeURIComponent(m[1]); } catch { return m[1]; }
   } catch {
     return "";
   }
 }
+/** Unique slug lookup keys for a candidate (URL slug, post_id slug, decoded variants). */
+export function slugCandidatesForPost(c = {}) {
+  const out = [];
+  const push = value => {
+    const raw = String(value || "").trim().replace(/^\/+|\/+$/g, "");
+    if (!raw) return;
+    let decoded = raw;
+    try { decoded = decodeURIComponent(raw); } catch { /* keep raw */ }
+    for (const s of [decoded, raw]) {
+      if (s && !out.includes(s)) out.push(s);
+    }
+  };
+  push(slugFromUrl(c.source?.url || c.url));
+  push(slugFromPostId(c.source?.postId || c.postId));
+  return out;
+}
 function authorFromPostJson(text) {
   try {
     const data = JSON.parse(text);
-    const bylines = Array.isArray(data?.publishedBylines) ? data.publishedBylines : [];
+    // /api/v1/posts/{slug} is flat; /api/v1/posts/by-id/{id} nests under .post
+    const post = data?.post && typeof data.post === "object" ? data.post : data;
+    const bylines = Array.isArray(post?.publishedBylines)
+      ? post.publishedBylines
+      : Array.isArray(data?.publishedBylines)
+        ? data.publishedBylines
+        : [];
     for (const row of bylines) {
       const name = String(row?.name || "").trim();
       if (name) return name;
@@ -340,14 +374,88 @@ function authorFromPostHtml(text) {
     const by = title[1].match(/\s+by\s+([^\-|–—]+?)(?:\s*[-|–—]|$)/i);
     if (by) return by[1].trim();
   }
+  // og:title sometimes keeps "Title - by Name"
+  const og = String(text || "").match(/property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
+    || String(text || "").match(/content=["']([^"']+)["'][^>]*property=["']og:title["']/i);
+  if (og) {
+    const by = og[1].match(/\s+by\s+([^\-|–—]+?)(?:\s*[-|–—]|$)/i);
+    if (by) return by[1].trim();
+  }
   return "";
 }
+/** Custom-domain pubs often also answer on {sub}.substack.com — try both. */
+export function publicationLookupRoots(publicationUrl = "", altPublicationUrl = "") {
+  const roots = [];
+  const push = value => {
+    const n = normalizeCanonicalUrl(value) || String(value || "").replace(/\/+$/, "");
+    if (!n) return;
+    try {
+      const u = new URL(n);
+      if (u.protocol !== "https:") return;
+      u.pathname = "/";
+      u.search = "";
+      u.hash = "";
+      const home = u.origin;
+      if (!roots.includes(home)) roots.push(home);
+    } catch { /* skip */ }
+  };
+  push(publicationUrl);
+  push(altPublicationUrl);
+  return roots;
+}
+async function lookupAuthorOnce(get, root, { slugs = [], numericId = "" } = {}) {
+  let lastErr = null;
+  for (const slug of slugs) {
+    try {
+      const apiUrl = new URL(root);
+      apiUrl.pathname = "/api/v1/posts/" + encodeURIComponent(slug);
+      const res = await get(apiUrl.toString(), 0, { accept: "application/json", maxBytes: 3_000_000 });
+      const author = authorFromPostJson(res.text);
+      if (author) return { author, via: "api" };
+    } catch (e) { lastErr = e; }
+  }
+  if (numericId) {
+    try {
+      const byId = new URL(root);
+      byId.pathname = "/api/v1/posts/by-id/" + encodeURIComponent(numericId);
+      const res = await get(byId.toString(), 0, { accept: "application/json", maxBytes: 3_000_000 });
+      const author = authorFromPostJson(res.text);
+      if (author) return { author, via: "api" };
+    } catch (e) { lastErr = e; }
+  }
+  for (const slug of slugs) {
+    try {
+      const pageUrl = new URL(root);
+      pageUrl.pathname = "/p/" + encodeURIComponent(slug);
+      const res = await get(pageUrl.toString(), 0, { accept: "text/html", maxBytes: 1_500_000 });
+      const author = authorFromPostHtml(res.text);
+      if (author) return { author, via: "html" };
+    } catch (e) { lastErr = e; }
+    try {
+      // Older / renamed posts sometimes live under /archive/
+      const archUrl = new URL(root);
+      archUrl.pathname = "/archive/" + encodeURIComponent(slug);
+      const res = await get(archUrl.toString(), 0, { accept: "text/html", maxBytes: 1_500_000 });
+      const author = authorFromPostHtml(res.text);
+      if (author) return { author, via: "html" };
+    } catch (e) { lastErr = e; }
+  }
+  if (lastErr) throw lastErr;
+  return { author: "", via: "" };
+}
 /**
- * Fill blank ZIP authors from live Substack: publication RSS first, then /api/v1/posts/{slug}.
+ * Fill blank ZIP authors from live Substack: publication RSS first, then /api/v1/posts/{slug},
+ * by-id, HTML /p/{slug}, and /archive/{slug}. Tries custom domain + optional *.substack.com alt.
  * Requires a publication homepage so we can build /p/{slug} and API URLs.
  * No LLM / Grok — public HTTPS lookups only.
  */
-export async function enrichSubstackAuthors(candidates, { publicationUrl = "", feedFetch = safeFetch, get = safeGet, maxLookups = 200 } = {}) {
+export async function enrichSubstackAuthors(candidates, {
+  publicationUrl = "",
+  altPublicationUrl = "",
+  feedFetch = safeFetch,
+  get = safeGet,
+  maxLookups = 200,
+} = {}) {
   const base = normalizeCanonicalUrl(publicationUrl)
     || publicationHomeFromUrls(candidates)
     || String(publicationUrl || "").replace(/\/+$/, "");
@@ -365,24 +473,26 @@ export async function enrichSubstackAuthors(candidates, { publicationUrl = "", f
         : "",
     };
   }
-  let root;
-  try { root = new URL(base); } catch {
+  const roots = publicationLookupRoots(base, altPublicationUrl);
+  if (!roots.length) {
     return { candidates, fromFeed: 0, fromApi: 0, fromHtml: 0, failed: 0, skipped: candidates.length, note: "" };
   }
 
   const bySlug = new Map();
   let fromFeed = 0, fromApi = 0, fromHtml = 0, failed = 0;
 
-  try {
-    const fetched = await feedFetch(base);
-    const items = parseFeed(fetched.text, fetched.url);
-    for (const item of items) {
-      const slug = slugFromUrl(item.source?.url) || slugFromPostId(item.source?.postId);
-      const author = String(item.author || "").trim();
-      if (slug && author) bySlug.set(slug, author);
+  for (const root of roots) {
+    try {
+      const fetched = await feedFetch(root);
+      const items = parseFeed(fetched.text, fetched.url);
+      for (const item of items) {
+        const slug = slugFromUrl(item.source?.url) || slugFromPostId(item.source?.postId);
+        const author = String(item.author || "").trim();
+        if (slug && author && !bySlug.has(slug)) bySlug.set(slug, author);
+      }
+    } catch {
+      // Feed optional — fall through to per-post API.
     }
-  } catch {
-    // Feed optional — fall through to per-post API.
   }
 
   const out = [];
@@ -392,15 +502,16 @@ export async function enrichSubstackAuthors(candidates, { publicationUrl = "", f
       out.push(c);
       continue;
     }
-    const slug = slugFromUrl(c.source?.url) || slugFromPostId(c.source?.postId);
-    if (!slug) {
-      out.push(c);
-      failed += 1;
+    const slugs = slugCandidatesForPost(c);
+    const hit = slugs.find(s => bySlug.has(s));
+    if (hit) {
+      fromFeed += 1;
+      out.push({ ...c, author: bySlug.get(hit) });
       continue;
     }
-    if (bySlug.has(slug)) {
-      fromFeed += 1;
-      out.push({ ...c, author: bySlug.get(slug) });
+    if (!slugs.length && !numericPostId(c.source?.postId || c.postId)) {
+      out.push(c);
+      failed += 1;
       continue;
     }
     if (lookups >= maxLookups) {
@@ -409,25 +520,34 @@ export async function enrichSubstackAuthors(candidates, { publicationUrl = "", f
       continue;
     }
     lookups += 1;
+    const numericId = numericPostId(c.source?.postId || c.postId);
     let author = "";
-    try {
-      const apiUrl = new URL(root);
-      apiUrl.pathname = "/api/v1/posts/" + encodeURIComponent(slug);
-      const res = await get(apiUrl.toString(), 0, { accept: "application/json", maxBytes: 3_000_000 });
-      author = authorFromPostJson(res.text);
-      if (author) fromApi += 1;
-    } catch { /* try HTML */ }
-    if (!author) {
+    let via = "";
+    for (const root of roots) {
       try {
-        const pageUrl = new URL(root);
-        pageUrl.pathname = "/p/" + encodeURIComponent(slug);
-        const res = await get(pageUrl.toString(), 0, { accept: "text/html", maxBytes: 1_500_000 });
-        author = authorFromPostHtml(res.text);
-        if (author) fromHtml += 1;
-      } catch { /* leave blank */ }
+        const found = await lookupAuthorOnce(get, root, { slugs, numericId });
+        if (found.author) {
+          author = found.author;
+          via = found.via;
+          break;
+        }
+      } catch { /* try next host */ }
+      // One soft retry on the primary host for flaky early/archived posts.
+      if (!author && root === roots[0]) {
+        try {
+          const found = await lookupAuthorOnce(get, root, { slugs, numericId });
+          if (found.author) {
+            author = found.author;
+            via = found.via;
+            break;
+          }
+        } catch { /* leave blank */ }
+      }
     }
     if (author) {
-      bySlug.set(slug, author);
+      for (const s of slugs) bySlug.set(s, author);
+      if (via === "html") fromHtml += 1;
+      else fromApi += 1;
       out.push({ ...c, author });
     } else {
       failed += 1;
@@ -618,6 +738,26 @@ export function publicationHomeFromUrls(candidates = []) {
   }
   return "";
 }
+/**
+ * When the pasted homepage is a custom domain, also try {sub}.substack.com if we can infer the sub
+ * from candidate URLs or a known pattern — helps early posts that 404 on the custom domain briefly.
+ */
+export function guessSubstackMirror(publicationUrl = "", candidates = []) {
+  const homes = [];
+  const push = value => {
+    try {
+      const u = new URL(normalizeCanonicalUrl(value) || value);
+      if (!/\.substack\.com$/i.test(u.hostname)) return;
+      const home = u.origin;
+      if (!homes.includes(home)) homes.push(home);
+    } catch { /* skip */ }
+  };
+  for (const c of candidates) push(c.source?.url || c.url);
+  push(publicationUrl);
+  if (homes.length) return homes[0];
+  // Custom domain only — no mirror known from ZIP URLs.
+  return "";
+}
 /** Substack exports often include email_list.{subdomain}.csv — enough to build https://{sub}.substack.com */
 export function detectPublicationFromExportFiles(files = []) {
   for (const file of files) {
@@ -715,11 +855,14 @@ export async function parseZip(base64, options = {}) {
   const backup = files.find(f => /(^|\/)writes-library\.json$/i.test(f.name));
   if (backup) return parseFile(backup.name, backup.text);
   if (files.some(f => /(^|\/)posts\.csv$/i.test(f.name))) {
-    const publicationUrl = options.publicationUrl || detectPublicationFromExportFiles(files) || "";
-    return parseSubstackExport(files, {
+    const detectedPublication = detectPublicationFromExportFiles(files) || "";
+    const publicationUrl = options.publicationUrl || detectedPublication || "";
+    const list = parseSubstackExport(files, {
       publicationUrl,
       defaultAuthor: options.defaultAuthor || "",
     });
+    list.detectedPublication = detectedPublication;
+    return list;
   }
   const writings = files.filter(f => !/(^|\/)(index|readme|manifest)\./i.test(f.name) && !/\.csv$/i.test(f.name)).slice(0, 40).flatMap(f => parseFile(f.name, f.text));
   if (!writings.length) fail("No supported writing files were found in this archive.");

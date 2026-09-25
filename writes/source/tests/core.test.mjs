@@ -126,7 +126,9 @@ test("author filter keeps only matching bylines",()=>{
   assert.equal(gated.kept,1);
   assert.equal(gated.skippedMissing,1);
   assert.equal(gated.skippedOther,1);
-  assert.equal(gated.candidates.filter(c=>c.authorGate==="block").length,2);
+  assert.equal(gated.candidates.find(c=>c.title==="Blank").authorGate,"unknown");
+  assert.equal(gated.candidates.find(c=>c.title==="S").authorGate,"block");
+  assert.equal(gated.candidates.filter(c=>c.authorGate==="block").length,1);
 });
 test("import preview defaults to author-only posts from multi-author feeds",async()=>{
   const multi=`<rss><channel><generator>Substack</generator>
@@ -143,7 +145,7 @@ test("import preview defaults to author-only posts from multi-author feeds",asyn
   const all=await app.route("member#james","POST","/api/import/preview",{url:"https://www.blog.farmapper.com/",includeAllAuthors:true},{display_name:"James McCall",username:"james"});
   assert.equal(all.candidates.length,2);
 });
-test("Substack ZIP with blank authors skips under author-only unless sole-author opt-in",async()=>{
+test("Substack ZIP blank authors are selectable unknowns unless sole-author opt-in",async()=>{
   const html='<p>Hello</p><img alt="Hero" src="https://substack-post-media.s3.amazonaws.com/public/images/hero.png"><p>More</p>';
   const csv='post_id,post_date,is_published,type,title,subtitle,audience\n190318527.we-named-a-mapping-tool-after-a-potato,2023-01-01T00:00:00.000Z,true,newsletter,We Named a Mapping Tool After a Potato.,,everyone\n190318528.samias-piece,2023-02-01T00:00:00.000Z,true,newsletter,Samias Piece,,everyone\n';
   const zip=new JSZip();
@@ -153,15 +155,21 @@ test("Substack ZIP with blank authors skips under author-only unless sole-author
   const base64=await zip.generateAsync({type:"base64"});
   const {app}=setup();
   const actor={display_name:"James McCall",username:"james"};
-  const blocked=await app.route("member#james","POST","/api/import/preview",{name:"export.zip",base64},actor);
-  assert.equal(blocked.candidates.length,2);
-  assert.equal(blocked.candidates.filter(c=>c.status==="excluded").length,2);
-  assert.equal(blocked.candidates.filter(c=>c.status==="new").length,0);
-  assert.match(blocked.warning,/no byline/i);
-  assert.match(blocked.warning,/0 matched/i);
+  const blank=await app.route("member#james","POST","/api/import/preview",{name:"export.zip",base64},actor);
+  assert.equal(blank.candidates.length,2);
+  assert.equal(blank.candidates.filter(c=>c.status==="excluded").length,0);
+  assert.equal(blank.candidates.filter(c=>c.authorGate==="unknown").length,2);
+  assert.equal(blank.candidates.filter(c=>c.status==="new").length,2);
+  assert.ok(blank.candidates.every(c=>c.body));
+  assert.match(blank.warning,/no byline/i);
+  assert.match(blank.warning,/listed unchecked/i);
+  assert.match(blank.warning,/0 matched/i);
   const sole=await app.route("member#james","POST","/api/import/preview",{name:"export.zip",base64,soleAuthorExport:true},actor);
   assert.equal(sole.candidates.filter(c=>c.status==="new").length,2);
-  assert.equal(sole.candidates.every(c=>c.authorGate!=="block"),true);
+  assert.equal(sole.candidates.every(c=>c.authorGate==="allow"),true);
+  // Commit allows unknown when rights confirmed
+  const committed=await app.route("member#james","POST","/api/import/commit",{jobId:blank.jobId,selected:[0],rights:true},actor);
+  assert.equal(committed.results[0].status,"imported");
 });
 test("ZIP auto-detects publication from email_list and enriches without pasted homepage",async()=>{
   const html="<p>Hi</p>";
@@ -192,6 +200,7 @@ test("ZIP author enrichment from Substack RSS/API enables author-only filter",as
     {title:"Mine",author:"",source:{url:"https://blog.maisaspace.org/p/giving-tree",postId:"1.giving-tree"}},
     {title:"Theirs",author:"",source:{url:"https://blog.maisaspace.org/p/empty-locker-decorated-halls",postId:"2.empty-locker-decorated-halls"}},
     {title:"Older",author:"",source:{url:"https://blog.maisaspace.org/p/maisa-space",postId:"3.maisa-space"}},
+    {title:"Early",author:"",source:{url:"https://blog.maisaspace.org/p/coming-soon",postId:"139368605.coming-soon"}},
   ];
   const feedXml=`<rss><channel><generator>Substack</generator>
     <item><guid>g1</guid><title>Giving Tree</title><link>https://blog.maisaspace.org/p/giving-tree</link><dc:creator><![CDATA[James McCall]]></dc:creator><content:encoded><![CDATA[<p>x</p>]]></content:encoded></item>
@@ -199,19 +208,25 @@ test("ZIP author enrichment from Substack RSS/API enables author-only filter",as
   </channel></rss>`;
   const enriched=await enrichSubstackAuthors(candidates,{
     publicationUrl:"https://blog.maisaspace.org/",
+    altPublicationUrl:"https://maisaspace.substack.com/",
     feedFetch:async()=>({url:"https://blog.maisaspace.org/feed",text:feedXml}),
     get:async(url)=>{
-      if(String(url).includes("/api/v1/posts/maisa-space")) return {text:JSON.stringify({publishedBylines:[{name:"James McCall",handle:"mccallios"}]}),url};
-      if(String(url).includes("/p/maisa-space")) return {text:"<title>Maisa Space - by James McCall - Maisa Space</title>",url};
+      const u=String(url);
+      if(u.includes("/api/v1/posts/maisa-space")) return {text:JSON.stringify({publishedBylines:[{name:"James McCall",handle:"mccallios"}]}),url};
+      if(u.includes("/api/v1/posts/coming-soon")) throw new Error("slug miss");
+      if(u.includes("/api/v1/posts/by-id/139368605")) return {text:JSON.stringify({post:{publishedBylines:[{name:"James McCall"}],slug:"coming-soon"}}),url};
+      if(u.includes("/p/maisa-space")) return {text:"<title>Maisa Space - by James McCall - Maisa Space</title>",url};
+      if(u.includes("maisaspace.substack.com")) throw new Error("alt unused when primary works");
       throw new Error("unexpected "+url);
     },
   });
   assert.equal(enriched.fromFeed,2);
-  assert.equal(enriched.fromApi,1);
+  assert.equal(enriched.fromApi,2);
   assert.equal(enriched.candidates[0].author,"James McCall");
   assert.equal(enriched.candidates[1].author,"Samia");
   assert.equal(enriched.candidates[2].author,"James McCall");
-  assert.match(enriched.note,/Looked up 3 authors/i);
+  assert.equal(enriched.candidates[3].author,"James McCall");
+  assert.match(enriched.note,/Looked up 4 authors/i);
 
   const html='<p>Hi</p>';
   const csv='post_id,post_date,is_published,type,title,subtitle,audience\n1.giving-tree,2023-01-01T00:00:00.000Z,true,newsletter,Giving Tree,,everyone\n2.empty-locker-decorated-halls,2023-02-01T00:00:00.000Z,true,newsletter,Empty Locker,,everyone\n';
@@ -223,7 +238,7 @@ test("ZIP author enrichment from Substack RSS/API enables author-only filter",as
   // Integration: fetcher provides feed authors for both ZIP posts.
   const job=await app.route("member#james","POST","/api/import/preview",{name:"export.zip",base64,publicationUrl:"https://blog.maisaspace.org/"},{display_name:"James McCall",username:"james"});
   assert.match(job.warning,/Looked up|Author filter on/i);
-  const allowed=job.candidates.filter(c=>c.status!=="excluded");
+  const allowed=job.candidates.filter(c=>c.status!=="excluded"&&c.authorGate!=="unknown");
   const blocked=job.candidates.filter(c=>c.status==="excluded");
   assert.equal(allowed.length,1);
   assert.equal(allowed[0].title,"Giving Tree");

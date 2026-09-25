@@ -305,9 +305,15 @@ export class Writes {
           publicationUrl: requestedPub,
         });
         // Always enrich: form homepage, else URLs from email_list.{sub}.csv auto-detect inside parseZip.
-        const pubUrl = requestedPub || publicationHomeFromUrls(candidates);
+        const pubUrl = requestedPub || candidates.detectedPublication || publicationHomeFromUrls(candidates);
+        const detectedPub = candidates.detectedPublication || "";
+        const altPublicationUrl = detectedPub
+          && normalizeCanonicalUrl(detectedPub) !== normalizeCanonicalUrl(pubUrl)
+          ? detectedPub
+          : "";
         const enriched = await enrichSubstackAuthors(candidates, {
           publicationUrl: pubUrl,
+          altPublicationUrl,
           feedFetch: this.fetcher,
         });
         candidates = enriched.candidates;
@@ -322,9 +328,12 @@ export class Writes {
           const tip = gated.skippedMissing && !lookedUp
             ? " Paste the publication homepage (e.g. https://blog.maisaspace.org) and Preview again so authors can be looked up."
             : gated.skippedOther
-              ? " Co-author posts stay skipped unless you enable “Import every author.”"
+              ? " Co-author posts stay locked unless you enable “Import every author.”"
               : "";
-          feedNote += `Substack export. Author filter on: ${gated.kept} matched ${aliases.join(" / ") || "your identity"}. Skipped ${gated.skippedOther} by other authors, ${gated.skippedMissing} with no byline.${tip} `;
+          const unknownTip = gated.skippedMissing
+            ? ` ${gated.skippedMissing} with no byline are listed unchecked — select them only if you own them, then confirm rights below.`
+            : "";
+          feedNote += `Substack export. Author filter on: ${gated.kept} matched ${aliases.join(" / ") || "your identity"}. Skipped ${gated.skippedOther} by other authors.${unknownTip}${tip} `;
         } else if (!authorsOnly) {
           feedNote += "Substack export. Importing every author (opt-in). ";
         } else {
@@ -378,6 +387,7 @@ export class Writes {
       const results = [];
       for (const index of selected) {
         const c = await this.store.get(owner,`job#${data.jobId}#${index}`);
+        // block/excluded stay hard-locked; authorGate "unknown" is allowed when rights are confirmed above.
         if (c.authorGate === "block" || c.status === "excluded") { results.push({title:c.title,status:"excluded"}); continue; }
         const old = await this.store.get(owner,"work#"+c.id);
         if (old?.source?.hash === c.source.hash) { results.push({title:c.title,status:"skipped"}); continue; }
