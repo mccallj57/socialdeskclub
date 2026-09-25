@@ -5,8 +5,8 @@ import ipaddr from "ipaddr.js";
 import { XMLParser } from "fast-xml-parser";
 import { parseHTML } from "linkedom";
 import yauzl from "yauzl";
-import { firstImageUrl, normalizeCanonicalUrl } from "../shared/manuscript.mjs";
-export { firstImageUrl, normalizeCanonicalUrl };
+import { coverFromWork, firstImageUrl, firstImageUrlFromHtml, normalizeCanonicalUrl } from "../shared/manuscript.mjs";
+export { coverFromWork, firstImageUrl, firstImageUrlFromHtml, normalizeCanonicalUrl };
 
 export function fail(message, status = 400) { const e = new Error(message); e.status = status; throw e; }
 export const hash = value => crypto.createHash("sha256").update(value).digest("hex");
@@ -211,7 +211,7 @@ export async function safeFetch(input, redirects = 0) {
 }
 const BLOCK = new Set(["P","DIV","SECTION","ARTICLE","H1","H2","H3","H4","BLOCKQUOTE","LI","UL","OL","FIGURE","FIGCAPTION"]);
 /** Keep HTTPS feed images as markdown markers; skip trackers / non-public schemes. */
-function imageMarkdown(node) {
+function imageMarkdown(node, baseUrl = "") {
   let src = (node.getAttribute("src") || "").trim();
   const alt = (node.getAttribute("alt") || "").trim().replace(/[\[\]]/g, "");
   const width = node.getAttribute("width");
@@ -227,19 +227,19 @@ function imageMarkdown(node) {
   }
   if (!src || /medium\.com\/_\/stat/i.test(src) || /^data:/i.test(src)) return "";
   let url;
-  try { url = new URL(src); } catch { return alt ? `[Image: ${alt}]\n` : ""; }
-  if (url.protocol !== "https:" || url.username || url.password) return alt ? `[Image: ${alt}]\n` : "";
+  try { url = new URL(src, baseUrl || undefined); } catch { return alt ? `[Image: ${alt}]\n` : `[Image]\n`; }
+  if (url.protocol !== "https:" || url.username || url.password) return alt ? `[Image: ${alt}]\n` : `[Image]\n`;
   const href = url.toString().replace(/[)\s]/g, encodeURIComponent);
   return `![${alt}](${href})\n\n`;
 }
-export function htmlText(html) {
+export function htmlText(html, baseUrl = "") {
   const { document } = parseHTML(`<html><body>${html}</body></html>`);
   document.querySelectorAll("script,style,iframe,object,embed,form,nav,noscript").forEach(n => n.remove());
   const render = (node, pre = false) => {
     if (node.nodeType === 3) return pre ? node.textContent : node.textContent.replace(/[\t\n\r ]+/g, " ");
     if (node.nodeType !== 1) return "";
     if (node.tagName === "BR") return "\n";
-    if (node.tagName === "IMG") return imageMarkdown(node);
+    if (node.tagName === "IMG") return imageMarkdown(node, baseUrl);
     const text = [...node.childNodes].map(n => render(n, pre || node.tagName === "PRE")).join("");
     return BLOCK.has(node.tagName) || node.tagName === "PRE" ? text + "\n\n" : text;
   };
@@ -257,7 +257,10 @@ function candidate(data) {
   if (bytes(original) > 160000) fail("One source exceeds the 160 KB original-source limit. Import it as plain text.");
   const url = normalizeCanonicalUrl(data.url) || String(data.url || "");
   const key = String(data.key || stableImportKey({ url, postId: data.postId, title: data.title, publishedAt: data.publishedAt, fallback: hash(data.body) }));
-  const coverUrl = normalizeCanonicalUrl(data.coverUrl) || firstImageUrl(data.body) || "";
+  const coverUrl = normalizeCanonicalUrl(data.coverUrl)
+    || firstImageUrl(data.body)
+    || firstImageUrlFromHtml(original)
+    || "";
   return {
     title: String(data.title || "Untitled").slice(0, 180),
     author: String(data.author || "").slice(0, 120),
@@ -303,14 +306,17 @@ export function parseFeed(xml, url) {
     if (Array.isArray(link)) link = link.find(l => l["@_rel"] === "alternate") || link[0];
     const href = typeof link === "object" ? link?.["@_href"] : link;
     const content = string(item["content:encoded"] || item.content || item.description || item.summary);
-    const body = htmlText(content);
     const postUrl = /^https?:\/\//i.test(href) ? href : (/^https?:\/\//i.test(string(item.guid || item.id)) ? string(item.guid || item.id) : "");
+    const body = htmlText(content, postUrl || url);
+    const enclosure = item.enclosure;
+    const enclosureUrl = typeof enclosure === "object" ? string(enclosure["@_url"]) : string(enclosure);
     return candidate({
       title: htmlText(string(item.title)),
       author: string(item["dc:creator"]) || string(item.author?.name) || string(item.author),
       body,
       original: content,
       url: postUrl,
+      coverUrl: /^https:\/\//i.test(enclosureUrl) ? enclosureUrl : "",
       publishedAt: string(item.pubDate || item.published || item.updated),
       postId: string(item.guid || item.id),
       key: stableImportKey({ url: postUrl, postId: string(item.guid || item.id), title: htmlText(string(item.title)), publishedAt: string(item.pubDate || item.published || item.updated), fallback: hash(url + "|" + (string(item.guid || item.id) || href || string(item.title))) }),

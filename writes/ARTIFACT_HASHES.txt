@@ -1,2 +1,5 @@
-35d61970f693cb6d60a5338780de91d9c5ca7f7866ef07194a795d5058026675  ../frontend/app.js
-916a407ee40b8a708337faaf610c60443d19767c30fb2722293482c0b2e0c1f0  ../writes-api.zip
+# SHA-256 of deploy artifacts (branch cursor/writes-shelf-covers-b8cc)
+frontend/app.js e8341466dd7ee80db7b554ec1e85f0d2ca48e9b503bfcfe99e95aa38563135bb
+frontend/app.css 8435b00cded6b5244c3236ab381278378acf577f44d12dac30018d3efb4601e4
+frontend/index.html b75755117f61b15a5ad2100d842695da450781bb7ca805c3bb808742c8a8e093
+writes-api.zip 06a4cd75ca58399c659007aa303949b2a37fd0c4313230cb436bce9431c1e7cd

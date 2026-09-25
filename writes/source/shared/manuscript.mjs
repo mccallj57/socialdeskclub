@@ -7,6 +7,28 @@ export function firstImageUrl(text = "") {
   return match ? match[2] : "";
 }
 
+/** First public HTTPS image from raw HTML (RSS content:encoded / Substack export). */
+export function firstImageUrlFromHtml(html = "") {
+  const input = String(html || "");
+  if (!input.includes("<")) return "";
+  // Substack often puts the durable CDN URL in data-attrs JSON.
+  for (const match of input.matchAll(/data-attrs=(["'])(.*?)\1/gi)) {
+    try {
+      const attrs = JSON.parse(match[2].replace(/&quot;/g, '"').replace(/&#39;/g, "'"));
+      const src = typeof attrs?.src === "string" ? attrs.src.trim() : "";
+      if (/^https:\/\//i.test(src) && !/medium\.com\/_\/stat/i.test(src)) return src;
+    } catch { /* keep scanning */ }
+  }
+  for (const match of input.matchAll(/<img\b[^>]*\bsrc=(["'])(.*?)\1[^>]*>/gi)) {
+    const tag = match[0];
+    const src = (match[2] || "").trim();
+    if (/width\s*=\s*["']?1["']?/i.test(tag) && /height\s*=\s*["']?1["']?/i.test(tag)) continue;
+    if (!src || /^data:/i.test(src) || /medium\.com\/_\/stat/i.test(src)) continue;
+    if (/^https:\/\//i.test(src)) return src;
+  }
+  return "";
+}
+
 export function normalizeCanonicalUrl(input) {
   if (!input || typeof input !== "string") return "";
   try {
@@ -21,6 +43,13 @@ export function normalizeCanonicalUrl(input) {
   } catch {
     return "";
   }
+}
+
+/** Prefer stored cover, then markdown body, then original HTML (covers [Image]-only bodies). */
+export function coverFromWork(work = {}) {
+  const stored = String(work.coverUrl || "").trim();
+  if (/^https:\/\//i.test(stored)) return stored;
+  return firstImageUrl(work.body) || firstImageUrlFromHtml(work.source?.original) || "";
 }
 
 export function splitManuscript(text = "") {

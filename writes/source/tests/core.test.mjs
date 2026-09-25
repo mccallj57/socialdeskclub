@@ -182,6 +182,29 @@ test("Substack feed images prefer data-attrs originals and label as Substack",()
   const feed=parseFeed(`<rss><channel><generator>Substack</generator><item><guid>9</guid><title>Farm</title><link>https://www.blog.farmapper.com/p/x</link><content:encoded><![CDATA[${html}]]></content:encoded></item></channel></rss>`,"https://www.blog.farmapper.com/feed");
   assert.equal(feed[0].source.platform,"Substack");
 });
+test("refresh-covers recovers image from source.original when body only has [Image]",async()=>{
+  const {coverFromWork,firstImageUrlFromHtml}=await import("../shared/manuscript.mjs");
+  const html='<p>Lead</p><img alt="Hero" src="https://substack-post-media.s3.amazonaws.com/public/images/farm.png"><p>More</p>';
+  assert.match(firstImageUrlFromHtml(html),/farm\.png/);
+  const ghost={title:"Farm",body:"Lead\n\n[Image]\n\nMore",kind:"essay",author:"James",coverUrl:"",source:{original:html,platform:"Substack",url:"https://www.blog.farmapper.com/p/x",key:"url|https://www.blog.farmapper.com/p/x",hash:"abc"}};
+  assert.match(coverFromWork(ghost),/farm\.png/);
+  const {store,app}=setup();
+  await store.commit([{pk:"member#james",sk:"work#import-old",value:{...ghost,id:"import-old",version:1,createdAt:"2020-01-01T00:00:00.000Z",updatedAt:"2020-01-01T00:00:00.000Z",archived:false,theme:"linen",collection:""},expected:0}]);
+  const listed=(await app.route("member#james","GET","/api/works")).works;
+  assert.match(listed[0].coverUrl,/farm\.png/);
+  const refreshed=await app.route("member#james","POST","/api/works/refresh-covers",{});
+  assert.equal(refreshed.updated,1);
+  assert.equal(refreshed.missing,0);
+  const saved=(await app.route("member#james","GET","/api/works/import-old")).work;
+  assert.match(saved.coverUrl,/farm\.png/);
+  const again=await app.route("member#james","POST","/api/works/refresh-covers",{});
+  assert.equal(again.updated,0);
+  assert.equal(again.already,1);
+});
+test("RSS enclosure supplies cover when body has no markdown image",()=>{
+  const feed=parseFeed(`<rss><channel><generator>Substack</generator><item><guid>1</guid><title>Post</title><link>https://www.blog.farmapper.com/p/1</link><enclosure url="https://substackcdn.com/image/fetch/hero.jpg" length="0" type="image/jpeg"/><content:encoded><![CDATA[<p>No figures here</p>]]></content:encoded></item></channel></rss>`,"https://www.blog.farmapper.com/feed");
+  assert.match(feed[0].coverUrl,/hero\.jpg/);
+});
 test("ZIP reads exported archive once, rather than duplicating format variants",async()=>{
   const zip=new JSZip();zip.file("writes-library.json",JSON.stringify({works:[{...original,id:"x"}]}));zip.file("piece/writing.txt",original.body);zip.file("piece/read.html","<p>Duplicate</p>");zip.file("piece/revisions/1.json",JSON.stringify(original));
   const works=await parseZip(await zip.generateAsync({type:"base64"}));assert.equal(works.length,1);assert.equal(works[0].body,original.body);
