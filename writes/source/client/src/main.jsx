@@ -4,6 +4,7 @@ import { BookOpen, Feather, Library, Plus, ArrowUpRight, ArrowLeft, ArrowRight, 
 import JSZip from "jszip";
 import { DEFAULT_LAYOUT, bookPages, stanzaParts } from "../../shared/poetry.mjs";
 import { htmlFromManuscript } from "../../shared/manuscript.mjs";
+import { defaultCategories, categoryIdFromKind } from "../../shared/bibliography.mjs";
 import { LayoutControls, VerseArranger, VerseText } from "./PoetryTools.jsx";
 import "./style.css";
 import "./poetry.css";
@@ -31,10 +32,12 @@ async function api(path, method = "GET", data) {
   }
   return out;
 }
-const emptyWork = () => ({title:"",author:"",body:"",kind:"poetry",collection:"",theme:"forest",archived:false,layout:{...DEFAULT_LAYOUT},versionName:""});
-const kinds = {poetry:"Poetry",story:"Stories",essay:"Essays",other:"Other writing"};
+const emptyWork = () => ({title:"",author:"",body:"",kind:"poetry",categoryId:"poetry",collection:"",theme:"forest",archived:false,layout:{...DEFAULT_LAYOUT},versionName:""});
+const kinds = {poetry:"Poetry",story:"Stories (narrative / fiction)",essay:"Essays (nonfiction)",other:"Other writing"};
+const kindHints = {poetry:"Verse and poems",story:"Narrative or fiction — rename the bibliography label to Fiction if you like",essay:"Nonfiction reflections and commentary",other:"Anything that doesn’t fit the others"};
 const countWords = text => text.trim().split(/\s+/).filter(Boolean).length;
 const dateLabel = date => new Date(date).toLocaleDateString(undefined,{month:"short",day:"numeric"});
+const yearLabel = date => { const d=new Date(date); return Number.isNaN(d.getTime())?"":String(d.getFullYear()); };
 const esc = s => String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,65)||"untitled";
 const coverFor = w => {
@@ -56,6 +59,7 @@ function App(){
   const [works,setWorks]=useState([]),[sources,setSources]=useState([]),[filter,setFilter]=useState("all"),[query,setQuery]=useState("");
   const [view,setView]=useState("library"),[work,setWork]=useState(null),[saved,setSaved]=useState(""),[busy,setBusy]=useState(false);
   const [modal,setModal]=useState(""),[reader,setReader]=useState(null),[returnView,setReturnView]=useState("library");
+  const [bibliography,setBibliography]=useState(null),[publicBib,setPublicBib]=useState(null),[bibLabels,setBibLabels]=useState(defaultCategories());
   const [history,setHistory]=useState([]),[shareUrl,setShareUrl]=useState(""),[theme,setTheme]=useState(()=>{
     try{const savedTheme=localStorage.getItem(THEME_KEY);if(savedTheme==="light"||savedTheme==="dark")return savedTheme;}catch{/* ignore */}
     return matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";
@@ -82,16 +86,25 @@ function App(){
       }catch{/* older Lambda without refresh-covers — list already backfills when possible */}
     }
     setWorks(list);setSources(b.sources);
+    try{
+      const bib=await api("/bibliography");
+      setBibliography(bib);
+      setBibLabels(bib.categories||defaultCategories());
+    }catch{/* older Lambda without bibliography */}
   }
   function signOut(){
     if(dirty&&!window.confirm("Sign out and discard unsaved changes? Your last saved version will remain."))return;
     coversRefreshed.current=false;
-    setToken("");setUser(null);setWorks([]);setSources([]);setWork(null);setSaved("");setView("library");setReader(null);setModal("");setError("");notice("Signed out of Writes.");
+    setToken("");setUser(null);setWorks([]);setSources([]);setBibliography(null);setWork(null);setSaved("");setView("library");setReader(null);setPublicBib(null);setModal("");setError("");notice("Signed out of Writes.");
   }
   async function boot(){
     try{
       const token=new URLSearchParams(location.hash.slice(1)).get("share");
-      if(token){setReader((await api("/public/"+encodeURIComponent(token))).work);setView("public");setLoading(false);return;}
+      if(token){
+        const out=await api("/public/"+encodeURIComponent(token));
+        if(out.bibliography){setPublicBib(out.bibliography);setView("public-bib");setLoading(false);return;}
+        setReader(out.work);setView("public");setLoading(false);return;
+      }
       if(cfg.mode==="production"){
         try{
           const health=await fetch(BASE+"/api/health",{headers:{"Accept":"application/json"}}).then(r=>r.ok?r.json():null).catch(()=>null);
@@ -115,9 +128,18 @@ function App(){
   useEffect(()=>{const fn=e=>{if(dirty){e.preventDefault();e.returnValue="";}};window.addEventListener("beforeunload",fn);return()=>window.removeEventListener("beforeunload",fn);},[dirty]);
   const abandon=()=>!dirty||window.confirm("Discard these unsaved changes? Your last saved version will remain.");
   function library(next="all"){if(!abandon())return;setWork(null);setView("library");setFilter(next);setQuery("");}
+  async function openBibliography(){if(!abandon())return;await attempt(async()=>{const bib=await api("/bibliography");setBibliography(bib);setBibLabels(bib.categories||defaultCategories());setWork(null);setView("bibliography");});}
   function newWork(){if(!abandon())return;const w=emptyWork();setWork(w);setSaved(JSON.stringify(w));setView("editor");}
-  async function edit(id){if(!abandon())return;await attempt(async()=>{const {work:w}=await api("/works/"+id);setWork(w);setSaved(JSON.stringify(w));setView("editor");});}
-  function change(field,value){setWork(w=>({...w,[field]:value}));}
+  async function edit(id){if(!abandon())return;await attempt(async()=>{const {work:w}=await api("/works/"+id);if(!w.categoryId)w.categoryId=categoryIdFromKind(w.kind);setWork(w);setSaved(JSON.stringify(w));setView("editor");});}
+  function change(field,value){
+    setWork(w=>{
+      const next={...w,[field]:value};
+      if(field==="kind"&&(!w.categoryId||["poetry","story","essay","blog"].includes(w.categoryId))){
+        next.categoryId=categoryIdFromKind(value);
+      }
+      return next;
+    });
+  }
   async function save(label=""){
     return attempt(async()=>{
       const {work:w}=await api(work.id?"/works/"+work.id:"/works",work.id?"PUT":"POST",{...work,versionName:typeof label==="string"?label:""});
@@ -198,6 +220,34 @@ function App(){
   const filtered=works.filter(w=>(filter==="archived"?w.archived:!w.archived)&&(filter==="all"||filter==="archived"||filter==="sources"||(filter==="shared"?w.shared:w.kind===filter))&&(w.title+" "+w.author+" "+w.collection).toLowerCase().includes(query.toLowerCase())).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
   const nav=[["all","My library",Library],["poetry","Poetry",Feather],["story","Stories",BookOpen],["essay","Essays",FileText],["other","Other writing",Bookmark],["sources","Imports",Upload],["shared","Shared snapshots",Link2],["archived","Archived",Archive]];
   const activeCount=works.filter(w=>!w.archived).length;
+  const categoryOptions=bibLabels.length?bibLabels:defaultCategories();
+  async function saveBibLabels(){
+    await attempt(async()=>{
+      const out=await api("/bibliography/categories","PUT",{categories:bibLabels});
+      setBibLabels(out.categories);
+      const bib=await api("/bibliography");
+      setBibliography(bib);
+      notice("Bibliography labels saved. Assigned works keep their category.");
+    });
+  }
+  async function shareBibliography(){
+    await attempt(async()=>{
+      const out=await api("/bibliography/share","POST",{confirm:true,title:(user?.display_name||user?.username||"My")+" bibliography"});
+      const url=location.href.split("#")[0]+"#share="+out.token;
+      setShareUrl(url);
+      setBibliography(b=>({...b,shareToken:out.token}));
+      notice("Bibliography link ready — titles only, not full drafts.");
+      try{await navigator.clipboard.writeText(url);}catch{/* ignore */}
+    });
+  }
+  async function revokeBibliography(){
+    await attempt(async()=>{
+      await api("/bibliography/share","DELETE");
+      setBibliography(b=>({...b,shareToken:""}));
+      setShareUrl("");
+      notice("Bibliography link revoked.");
+    });
+  }
   return <><a className="skip-link" href="#writes-main">Skip to content</a><header className="topbar">
     <a className="brand" href="https://socialdeskclub.com/" target="_blank" rel="noreferrer"><Logo/><span>Social Desk Club</span></a>
     <nav className="site-nav" aria-label="Social Desk Club"><a href="https://socialdeskclub.com/reads/" target="_blank" rel="noreferrer">Reads <ArrowUpRight size={13}/></a><button className="active" onClick={()=>library()}>Writes</button><a href="https://socialdeskclub.com/camp/" target="_blank" rel="noreferrer">Camp <ArrowUpRight size={13}/></a></nav>
@@ -206,16 +256,35 @@ function App(){
   {error&&<div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={()=>setError("")}><X size={18}/></button></div>}
   {loading?<div className="loading" id="writes-main"><Logo/><p>Opening your writing desk…</p></div>:
   view==="public"&&reader?<Reader work={reader} publicView onClose={()=>{location.hash="";setReader(null);setView("library");}}/>:
+  view==="public-bib"&&publicBib?<PublicBibliography bib={publicBib} onClose={()=>{location.hash="";setPublicBib(null);setView("library");}}/>:
   !user?<main className="signin" id="writes-main"><Logo/><p className="eyebrow">SOCIAL DESK CLUB · WRITES</p><h1>Your words have a home.</h1><p>Sign in with your existing Reads member account. Your writing library is separate and private.</p>{cfg.mode==="production"&&!apiReady&&<p className="callout" role="status">The Writes desk is still finishing setup. If this persists, ask an administrator to upload the API package.</p>}{cfg.mode==="production"?<form onSubmit={login}><label>Username<input required value={username} onChange={e=>setUsername(e.target.value)} autoComplete="username"/></label><label>Password<input required type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password"/></label><Button variant="primary" disabled={busy||!apiReady}>Sign in to Writes</Button><a href="https://socialdeskclub.com/reads/" target="_blank" rel="noreferrer">Create a member account in Reads</a></form>:<Button icon={RefreshCw} onClick={()=>{setLoading(true);boot();}}>Try opening the desk again</Button>}<p className="fineprint">Writes never changes your Reads password. Snapshots you share are deliberate copies, not live drafts.</p></main>:
   view==="reader"?<Reader work={reader} onClose={()=>setView(returnView)}/>:
   <div className={"shell "+(view==="editor"?"editing":"")} id="writes-main">
     <aside className="sidebar"><div className="desk-label"><span className="avatar"><Feather size={18}/></span><div><strong>Your writing desk</strong><small>{cfg.mode==="production"?(user.display_name||user.username):"A private place to begin"}</small></div></div>
-      <div className="nav-label">YOUR SHELVES</div><nav aria-label="Writing library">{nav.map(([id,label,Icon])=><button key={id} className={view==="library"&&filter===id?"selected":""} onClick={()=>library(id)}><Icon size={18}/><span>{label}</span>{["all","poetry","story","essay"].includes(id)&&<small>{works.filter(w=>!w.archived&&(id==="all"||w.kind===id)).length}</small>}</button>)}</nav>
+      <div className="nav-label">YOUR SHELVES</div><nav aria-label="Writing library">{nav.map(([id,label,Icon])=><button key={id} className={view==="library"&&filter===id?"selected":""} onClick={()=>library(id)}><Icon size={18}/><span>{label}</span>{["all","poetry","story","essay"].includes(id)&&<small>{works.filter(w=>!w.archived&&(id==="all"||w.kind===id)).length}</small>}</button>)}
+        <button className={view==="bibliography"?"selected":""} onClick={openBibliography}><Library size={18}/><span>Bibliography</span><small>{works.filter(w=>!w.archived).length}</small></button>
+      </nav>
       <div className="capacity" aria-live="polite"><span>Library capacity</span><strong>{activeCount} / {LIBRARY_LIMIT}</strong><div className="capacity-bar" role="presentation"><span style={{width:`${Math.min(100,(activeCount/LIBRARY_LIMIT)*100)}%`}}/></div></div>
       <div className="ownership"><Bookmark size={21}/><strong>Yours, wherever you go.</strong><p>Keep the original. Make something new. Take every word with you.</p><button onClick={()=>setModal("about")}>The Writes promise <ArrowUpRight size={15}/></button></div>
       <button className="sidebar-export" disabled={busy||!works.length} onClick={()=>exportWorks(works.map(w=>w.id))}><Download size={18}/>Export my library</button>
     </aside>
-    {view==="library"?<main className="library">
+    {view==="bibliography"?<main className="library bibliography-view">
+      <div className="page-heading"><div><p className="eyebrow">WRITES / BIBLIOGRAPHY</p><h1>A living bibliography.</h1><p className="lede">Your library, listed by category. Rename labels anytime — Stories can become Fiction without moving a single piece.</p></div><div className="heading-actions"><Button icon={Link2} onClick={shareBibliography} disabled={busy}>Share bibliography</Button><Button icon={RefreshCw} onClick={openBibliography} disabled={busy}>Refresh</Button></div></div>
+      {bibliography?.shareToken&&<p className="callout">Public link (titles only): <a href={location.href.split("#")[0]+"#share="+bibliography.shareToken} target="_blank" rel="noreferrer">{location.href.split("#")[0]+"#share="+bibliography.shareToken}</a> · <button type="button" className="text-button" onClick={revokeBibliography}>Revoke</button></p>}
+      <section className="sources-panel bib-labels"><div className="section-label"><h2>Category labels</h2><span>Ids stay stable; only names change</span></div>
+        <div className="bib-label-grid">{categoryOptions.map((c,i)=><label key={c.id}><span>{c.id}</span><input maxLength={60} value={bibLabels[i]?.label??c.label} onChange={e=>setBibLabels(list=>list.map((row,idx)=>idx===i?{...row,label:e.target.value}:row))}/><small>{bibLabels[i]?.hint||c.hint}</small></label>)}</div>
+        <div className="modal-actions" style={{justifyContent:"flex-start"}}><Button variant="primary" disabled={busy} onClick={saveBibLabels}>Save labels</Button></div>
+        <p className="fineprint">Essays ≈ nonfiction. Stories ≈ narrative/fiction. Scholarly papers, speeches, interviews, and blog stand alone. Assign a category on each piece in the editor.</p>
+      </section>
+      {(bibliography?.sections||[]).map(section=>(
+        <section className="bib-section" key={section.id}>
+          <div className="section-label"><h2>{section.label}</h2><span>{section.entries.length}</span></div>
+          {section.hint&&<p className="fineprint">{section.hint}</p>}
+          {section.entries.length?<ul className="bib-list">{section.entries.map(e=><li key={e.id}><div><strong>{e.title}</strong><small>{e.author||"By you"}{e.publishedAt?` · ${yearLabel(e.publishedAt)||dateLabel(e.publishedAt)}`:""}{e.sourceUrl?<> · <a href={e.sourceUrl} target="_blank" rel="noreferrer">Source</a></>:null}</small></div><button className="edit-link" type="button" onClick={()=>edit(e.id)}>Open <ArrowUpRight size={15}/></button></li>)}</ul>:<p className="fineprint">Nothing in this category yet.</p>}
+        </section>
+      ))}
+      <footer><span><Lock size={13}/>Bibliography shares list titles only</span><span>Assign categories in the editor.</span></footer>
+    </main>:view==="library"?<main className="library">
       <div className="page-heading"><div><p className="eyebrow">WRITES / {filter==="all"?"YOUR LIBRARY":nav.find(n=>n[0]===filter)?.[1].toUpperCase()}</p><h1>{filter==="all"?"A home for your words.":filter==="sources"?"Bring your writing home.":nav.find(n=>n[0]===filter)?.[1]}</h1><p className="lede">{filter==="sources"?"Import from a publication, an export file, or the page in front of you.":"Poems, stories, and things not quite named yet. All in one place."}</p></div><div className="heading-actions"><Button icon={Upload} onClick={()=>setModal("import")}>Import writing</Button><Button icon={Plus} variant="primary" onClick={newWork}>New writing</Button></div></div>
       {cfg.mode!=="production"&&<div className="preview-note"><span className="status-dot"/>Your own preview workspace. The sample books are examples, not imported member writing.</div>}
       {filter==="sources"?<section className="sources-panel"><div className="section-label"><h2>Your sources</h2><span>Refresh is always manual</span></div>{sources.length?sources.map(s=><div className="source-row" key={s.id}><div><strong>{new URL(s.url).hostname}</strong><p>{s.url}</p><small>Last import {dateLabel(s.updatedAt)}</small></div><Button icon={RefreshCw} onClick={()=>{setShareUrl(s.url);setModal("import");}}>Review new posts</Button></div>):<div className="empty-state"><Upload size={28}/><h2>No publications connected yet.</h2><p>Add your Medium or Substack feed. You will review the available posts before anything is copied.</p><Button variant="primary" onClick={()=>setModal("import")}>Import your first posts</Button></div>}<p className="fineprint">Feeds may contain only recent posts or excerpts. For a fuller archive, use your platform’s export. HTTPS images from the feed are kept as linked addresses; image files are not stored in Writes. Audio and video are still skipped.</p></section>:
@@ -233,7 +302,10 @@ function App(){
         <div className="writing-toolbar"><span><Feather size={15}/>{kinds[work.kind]}</span><button onClick={()=>setModal("arrange")}><AlignLeft size={15}/>Arrange verse</button><button onClick={()=>{const el=bodyRef.current,a=el.selectionStart,b=el.selectionEnd;change("body",work.body.slice(0,a)+"\n\n[[page]]\n\n"+work.body.slice(b));setTimeout(()=>{el.focus();el.setSelectionRange(a+12,a+12);},0);}}><Scissors size={15}/>Page break</button></div>
         <label className="sr-only" htmlFor="work-body">Manuscript</label><textarea id="work-body" ref={bodyRef} className="body-input" spellCheck placeholder={"Begin here.\n\nA line, a stanza, a very small adventure."} value={work.body} onChange={e=>change("body",e.target.value)}/>
         <div className="writing-status"><span>{countWords(work.body)} words · {bookPages(work.body,work.layout).length} book {bookPages(work.body,work.layout).length===1?"page":"pages"}</span><span>Line breaks stay as you write them.</span></div>
-      </section><aside className="editor-settings"><h2>Make it yours</h2><label>Writing type<select value={work.kind} onChange={e=>change("kind",e.target.value)}>{Object.entries(kinds).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label><label>Collection<input placeholder="An optional shelf name" value={work.collection} maxLength={80} onChange={e=>change("collection",e.target.value)}/></label>
+      </section><aside className="editor-settings"><h2>Make it yours</h2><label>Writing type<select value={work.kind} onChange={e=>change("kind",e.target.value)}>{Object.entries(kinds).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label><p className="fineprint">{kindHints[work.kind]}</p>
+        <label>Bibliography category<select value={work.categoryId||categoryIdFromKind(work.kind)} onChange={e=>change("categoryId",e.target.value)}>{categoryOptions.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}</select></label>
+        <p className="fineprint">{categoryOptions.find(c=>c.id===(work.categoryId||categoryIdFromKind(work.kind)))?.hint||"Appears under this heading in your living bibliography."}</p>
+        <label>Collection<input placeholder="An optional shelf name" value={work.collection} maxLength={80} onChange={e=>change("collection",e.target.value)}/></label>
         <fieldset><legend>Book cover</legend><div className="swatches">{["forest","clay","linen","night"].map(t=><button key={t} className={"swatch "+t+(t===work.theme?" chosen":"")} aria-label={t+" cover"} aria-pressed={t===work.theme} onClick={()=>change("theme",t)}>{t===work.theme?<Check size={18}/>:null}</button>)}</div></fieldset>
         <p className="setting-note">Use a page break where a poem or chapter should turn. Long pages scroll, so nothing is cut off.</p>
         <LayoutControls value={work.layout} onChange={v=>change("layout",v)}/>
@@ -259,26 +331,38 @@ function ImportModal({initialUrl,initialName,onClose,onDone}){
   const isGoogle=initialUrl.startsWith("https://docs.google.com/document/");
   const [tab,setTab]=useState(isGoogle?"google":"feed"),[url,setUrl]=useState(isGoogle?"":initialUrl),[name,setName]=useState(isGoogle?(initialName||"Google Docs draft"):"Pasted writing.txt"),[text,setText]=useState(""),[base64,setBase64]=useState("");
   const [googleDocUrl,setGoogleDocUrl]=useState(isGoogle?initialUrl:"");
-  const [job,setJob]=useState(null),[selected,setSelected]=useState([]),[rights,setRights]=useState(false),[approve,setApprove]=useState(false),[includeAllAuthors,setIncludeAllAuthors]=useState(false),[publicationUrl,setPublicationUrl]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  const [job,setJob]=useState(null),[selected,setSelected]=useState([]),[rights,setRights]=useState(false),[approve,setApprove]=useState(false),[includeAllAuthors,setIncludeAllAuthors]=useState(false),[soleAuthorExport,setSoleAuthorExport]=useState(false),[publicationUrl,setPublicationUrl]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
   async function run(fn){setBusy(true);setError("");try{await fn();}catch(e){setError(e.message);}finally{setBusy(false);}}
   async function file(e){
     setError("");const f=e.target.files[0];if(!f)return;const zip=f.name.toLowerCase().endsWith(".zip");if(f.size>(zip?25000000:3000000)){setError(zip?"Choose a ZIP smaller than 25 MB.":"Choose a file smaller than 3 MB.");return;}
     setName(f.name);setText("");setBase64("");
     if(f.name.toLowerCase().endsWith(".zip")){const r=new FileReader();r.onload=()=>setBase64(r.result.split(",")[1]);r.readAsDataURL(f);}else setText(await f.text());
   }
-  async function preview(e){e.preventDefault();await run(async()=>{const out=await api("/import/preview","POST",tab==="feed"?{url,includeAllAuthors}:tab==="google"?{googleDocUrl,name,text}:{name,text,base64,publicationUrl,includeAllAuthors});setJob(out);setApprove(false);setRights(false);setSelected(out.candidates.filter(c=>c.status==="new").map(c=>c.index));});}
+  async function preview(e){e.preventDefault();await run(async()=>{const out=await api("/import/preview","POST",tab==="feed"?{url,includeAllAuthors}:tab==="google"?{googleDocUrl,name,text}:{name,text,base64,publicationUrl,includeAllAuthors,soleAuthorExport});setJob(out);setApprove(false);setRights(false);setSelected(out.candidates.filter(c=>c.status==="new").map(c=>c.index));});}
   async function commit(){await run(async()=>{const out=await api("/import/commit","POST",{jobId:job.jobId,selected,rights,approvedChanges:approve?selected:[]});const n=out.results.filter(r=>["imported","updated"].includes(r.status)).length,pending=out.results.filter(r=>["conflict","needs-review"].includes(r.status)).length;if(pending){setError(`${n} saved. ${pending} changed while you were reviewing. Preview again before updating those pieces.`);setJob(null);}else await onDone(`${n} ${n===1?"piece":"pieces"} saved to your private library.`);});}
+  const statusLabel=c=>c.status==="excluded"?(c.authorNote?`Skipped — ${c.authorNote}`:"Skipped — not your byline"):c.status==="new"?"New":c.status==="unchanged"?"Already in library":"Changed — review";
   return <Modal title={job?"Review before bringing it home":"Bring your writing home"} wide onClose={()=>{if(!busy)onClose();}}><div className="modal-body">
     {error&&<p className="form-error" role="alert">{error}</p>}
     {!job?<><p>Copy your own writing into an independent library. Nothing is posted back to its source.</p><div className="tabs" role="tablist" aria-label="Import method">{[["feed","Publication feed"],["google","Google Docs paste"],["file","Upload a file"],["paste","Paste text"]].map(([id,label])=><button role="tab" aria-selected={tab===id} key={id} onClick={()=>{setTab(id);setError("");setName(id==="google"?"Google Docs draft":"Pasted writing.txt");setText("");setBase64("");}}>{label}</button>)}</div><form onSubmit={preview}>
-      {tab==="google"?<><p className="callout">No live Google connection. Paste your draft or upload its TXT export. The document address only matches later imports to the same writing — it never fetches the Doc.</p><label>Google Doc address<input type="url" required placeholder="https://docs.google.com/document/d/…" value={googleDocUrl} onChange={e=>setGoogleDocUrl(e.target.value)}/></label><label>Writing title<input required maxLength={180} value={name} onChange={e=>setName(e.target.value)}/></label><label>Plain-text export<input type="file" accept=".txt" aria-label="Google Docs text export" onChange={async e=>{const f=e.target.files[0];if(!f)return;if(!f.name.toLowerCase().endsWith(".txt")||f.size>120000){setError("Choose a TXT export smaller than 120 KB.");return;}setName(f.name.replace(/\.txt$/i,""));setText(await f.text());setError("");}}/></label><label>Draft text<textarea required className="paste-input" value={text} onChange={e=>setText(e.target.value)} placeholder="Paste the draft, keeping its line breaks."/></label><p className="fineprint">Review spacing before importing. Only this text is archived, not Google comments, formatting, images, or earlier Google revisions. Re-import with the same Doc address when you want to review a newer draft.</p></>:tab==="feed"?<><label>Medium, Substack, or RSS address<input required type="url" placeholder="https://your-publication.substack.com" value={url} onChange={e=>setUrl(e.target.value)}/></label><label className="check-label"><input type="checkbox" checked={includeAllAuthors} onChange={e=>setIncludeAllAuthors(e.target.checked)}/><span>Import every author on this publication (not just my posts)</span></label><p className="fineprint">By default only posts matching your Reads name/username (and Substack @profile name) are listed. Medium profile: https://medium.com/@yourname<br/>Substack: https://yourname.substack.com or https://substack.com/@yourname<br/>Custom-domain blogs: https://www.blog.example.com — Writes appends /feed automatically.</p></>:tab==="file"?<><label className="file-drop"><Upload size={28}/><strong>Choose an export or a writing file</strong><span>TXT, MD, HTML, JSON, Substack ZIP · up to 25 MB for Substack exports</span><input aria-label="Writing file" type="file" accept=".txt,.md,.html,.htm,.json,.zip" onChange={file}/></label>{(text||base64)&&<p className="file-selected"><Check size={16}/>{name}</p>}{String(name).toLowerCase().endsWith(".zip")&&<label>Publication homepage (for Substack ZIP URLs)<input type="url" placeholder="https://www.blog.farmapper.com" value={publicationUrl} onChange={e=>setPublicationUrl(e.target.value)}/></label>}<label className="check-label"><input type="checkbox" checked={includeAllAuthors} onChange={e=>setIncludeAllAuthors(e.target.checked)}/><span>Import every author in this file (not just my posts)</span></label><p className="fineprint">Substack: Settings → Exports → Create new export → download the ZIP (posts.csv + posts/*.html). Paste the publication homepage so post URLs match prior RSS imports and dedupe. Already-in-library pieces show as unchanged. HTTPS images stay linked; the ZIP does not include image binaries.</p></>:<><label>File or piece name<input value={name} required onChange={e=>setName(e.target.value)}/></label><label>Your text<textarea className="paste-input" required value={text} onChange={e=>setText(e.target.value)}/></label></>}
+      {tab==="google"?<><p className="callout">No live Google connection. Paste your draft or upload its TXT export. The document address only matches later imports to the same writing — it never fetches the Doc.</p><label>Google Doc address<input type="url" required placeholder="https://docs.google.com/document/d/…" value={googleDocUrl} onChange={e=>setGoogleDocUrl(e.target.value)}/></label><label>Writing title<input required maxLength={180} value={name} onChange={e=>setName(e.target.value)}/></label><label>Plain-text export<input type="file" accept=".txt" aria-label="Google Docs text export" onChange={async e=>{const f=e.target.files[0];if(!f)return;if(!f.name.toLowerCase().endsWith(".txt")||f.size>120000){setError("Choose a TXT export smaller than 120 KB.");return;}setName(f.name.replace(/\.txt$/i,""));setText(await f.text());setError("");}}/></label><label>Draft text<textarea required className="paste-input" value={text} onChange={e=>setText(e.target.value)} placeholder="Paste the draft, keeping its line breaks."/></label><p className="fineprint">Review spacing before importing. Only this text is archived, not Google comments, formatting, images, or earlier Google revisions. Re-import with the same Doc address when you want to review a newer draft.</p></>:tab==="feed"?<><label>Medium, Substack, or RSS address<input required type="url" placeholder="https://your-publication.substack.com" value={url} onChange={e=>setUrl(e.target.value)}/></label><label className="check-label"><input type="checkbox" checked={includeAllAuthors} onChange={e=>setIncludeAllAuthors(e.target.checked)}/><span>Import every author on this publication (not just my posts)</span></label><p className="fineprint">By default only posts matching your Reads name/username (and Substack @profile name) are listed. Medium profile: https://medium.com/@yourname<br/>Substack: https://yourname.substack.com or https://substack.com/@yourname<br/>Custom-domain blogs: https://www.blog.example.com — Writes appends /feed automatically.</p></>:tab==="file"?<><label className="file-drop"><Upload size={28}/><strong>Choose an export or a writing file</strong><span>TXT, MD, HTML, JSON, Substack ZIP · up to 25 MB for Substack exports</span><input aria-label="Writing file" type="file" accept=".txt,.md,.html,.htm,.json,.zip" onChange={file}/></label>{(text||base64)&&<p className="file-selected"><Check size={16}/>{name}</p>}{String(name).toLowerCase().endsWith(".zip")&&<><label>Publication homepage (for Substack ZIP URLs)<input type="url" placeholder="https://blog.maisaspace.org" value={publicationUrl} onChange={e=>setPublicationUrl(e.target.value)}/></label><label className="check-label"><input type="checkbox" checked={soleAuthorExport} onChange={e=>{setSoleAuthorExport(e.target.checked);if(e.target.checked)setIncludeAllAuthors(false);}}/><span>This export is only my writing (blank bylines count as mine — e.g. Farmapper)</span></label></>}<label className="check-label"><input type="checkbox" checked={includeAllAuthors} onChange={e=>{setIncludeAllAuthors(e.target.checked);if(e.target.checked)setSoleAuthorExport(false);}}/><span>Import every author in this file (not just my posts)</span></label><p className="fineprint">Substack ZIPs often have no author column. Author-only mode skips blank bylines unless you check “only my writing.” Co-authored pubs (e.g. Maisa Space) stay skipped until you opt into every author. Paste the publication homepage so URLs dedupe against prior RSS.</p></>:<><label>File or piece name<input value={name} required onChange={e=>setName(e.target.value)}/></label><label>Your text<textarea className="paste-input" required value={text} onChange={e=>setText(e.target.value)}/></label></>}
       <div className="callout"><Lock size={17}/><span>Feeds can be incomplete or excerpt-only. Imported HTML is converted to plain text, so review poetry spacing before saving.</span></div><div className="modal-actions"><Button disabled={busy||(tab==="file"&&!text&&!base64)} variant="primary">{busy?"Reading the source…":"Preview import"}</Button></div></form></>:
-    <><p className="callout">{job.warning}</p><div className="import-list">{job.candidates.map(c=><div className={"import-item "+(c.status==="unchanged"?"unchanged":"")} key={c.index}><label className="candidate-label"><input type="checkbox" disabled={c.status==="unchanged"} checked={selected.includes(c.index)} onChange={e=>setSelected(s=>e.target.checked?[...s,c.index]:s.filter(i=>i!==c.index))}/><span><strong>{c.title}</strong><small>{c.platform}{c.author?` · ${c.author}`:""} · {c.status==="new"?"New":c.status==="unchanged"?"Already in library":"Changed — review"}{c.coverUrl?" · has image":""}</small></span></label><details><summary>Read imported text{c.status==="changed"?" and compare":""}</summary>{c.status==="changed"&&<><h4>Your current writing</h4><div className="import-preview-body"><VerseText text={c.existingBody||""} wrap/></div><h4>Incoming text</h4></>}<div className="import-preview-body"><VerseText text={c.body||"(No text in this feed entry)"} wrap/></div></details></div>)}</div>
+    <><p className="callout">{job.warning}</p><div className="import-list">{job.candidates.map(c=><div className={"import-item "+(c.status==="unchanged"||c.status==="excluded"?"unchanged":"")} key={c.index}><label className="candidate-label"><input type="checkbox" disabled={c.status==="unchanged"||c.status==="excluded"} checked={selected.includes(c.index)} onChange={e=>setSelected(s=>e.target.checked?[...s,c.index]:s.filter(i=>i!==c.index))}/><span><strong>{c.title||"(Untitled)"}</strong><small>{c.platform}{c.author?` · ${c.author}`:""} · {statusLabel(c)}{c.coverUrl?" · has image":""}</small></span></label>{c.status!=="excluded"&&<details><summary>Read imported text{c.status==="changed"?" and compare":""}</summary>{c.status==="changed"&&<><h4>Your current writing</h4><div className="import-preview-body"><VerseText text={c.existingBody||""} wrap/></div><h4>Incoming text</h4></>}<div className="import-preview-body"><VerseText text={c.body||"(No text in this feed entry)"} wrap/></div></details>}</div>)}</div>
       <label className="check-label"><input type="checkbox" checked={rights} onChange={e=>setRights(e.target.checked)}/><span>I own the selected writing or have permission to copy it.</span></label>
       {job.candidates.some(c=>c.status==="changed"&&selected.includes(c.index))&&<label className="check-label"><input type="checkbox" checked={approve} onChange={e=>setApprove(e.target.checked)}/><span>I reviewed the changes. Replace the selected current text and keep its previous version in history.</span></label>}
       <div className="modal-actions"><Button disabled={busy} onClick={()=>setJob(null)}>Back</Button><Button variant="primary" disabled={busy||!rights||!selected.length||(job.candidates.some(c=>c.status==="changed"&&selected.includes(c.index))&&!approve)} onClick={commit}>{busy?"Saving copies…":`Import ${selected.length} ${selected.length===1?"piece":"pieces"}`}</Button></div>
     </>}
   </div></Modal>;
+}
+function PublicBibliography({bib,onClose}){
+  return <main className="library bibliography-view public-bib" id="writes-main">
+    <div className="page-heading"><div><p className="eyebrow">SOCIAL DESK CLUB · WRITES</p><h1>{bib.title||"Bibliography"}</h1><p className="lede">{bib.author?`A public reading list from ${bib.author}.`:"A public reading list from Writes."} Titles only — not the full drafts.</p></div><Button icon={X} onClick={onClose}>Close</Button></div>
+    {(bib.sections||[]).map(section=>(
+      <section className="bib-section" key={section.id}>
+        <div className="section-label"><h2>{section.label}</h2><span>{(section.entries||[]).length}</span></div>
+        {(section.entries||[]).length?<ul className="bib-list">{section.entries.map((e,i)=><li key={i}><div><strong>{e.title}</strong><small>{e.author||""}{e.publishedAt?` · ${yearLabel(e.publishedAt)||dateLabel(e.publishedAt)}`:""}{e.sourceUrl?<> · <a href={e.sourceUrl} target="_blank" rel="noreferrer">Source</a></>:null}</small></div></li>)}</ul>:<p className="fineprint">No entries.</p>}
+      </section>
+    ))}
+  </main>;
 }
 function Reader({work,onClose,publicView=false}){
   const pages=bookPages(work.body,work.layout),[index,setIndex]=useState(0),[mode,setMode]=useState("book"),[wrap,setWrap]=useState(work.kind!=="poetry"),[flipping,setFlipping]=useState(false);

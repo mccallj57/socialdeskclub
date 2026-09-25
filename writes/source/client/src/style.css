@@ -13,3 +13,14 @@ dialog{border:1px solid var(--line);padding:0;background:var(--surface);color:va
 @media(max-width:500px){.editor-settings{grid-template-columns:minmax(0,1fr)}.editor-settings .source-card,.editor-settings h2,.editor-settings .settings-divider{grid-column:1}.swatches{gap:var(--space-3)}.swatch{width:48px;height:48px}.editor-settings .button{justify-content:center}}
 
 .book-cover.has-art{background-size:cover;background-position:center;color:#f6f3ea;text-shadow:0 1px 2px rgba(0,0,0,.45)}.book-cover.has-art .cover-top,.book-cover.has-art .cover-author,.book-cover.has-art .cover-bottom{color:#f0ebe0}.book-cover.has-art .cover-rule{background:rgba(246,243,234,.55)}
+
+.bibliography-view .bib-section{margin:var(--space-8) 0}
+.bibliography-view .bib-list{list-style:none;margin:0;padding:0;display:grid;gap:var(--space-3)}
+.bibliography-view .bib-list li{display:flex;justify-content:space-between;gap:var(--space-4);align-items:flex-start;padding:var(--space-4) 0;border-bottom:1px solid var(--line)}
+.bibliography-view .bib-list strong{display:block;font-family:var(--font-display,inherit);font-weight:500;font-size:1.05rem}
+.bibliography-view .bib-list small{display:block;color:var(--muted);margin-top:.25rem}
+.bib-label-grid{display:grid;gap:var(--space-4);grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin:var(--space-4) 0}
+.bib-label-grid label span{display:block;font-size:var(--text-xs);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:.35rem}
+.bib-label-grid small{display:block;color:var(--muted);font-size:var(--text-xs);margin-top:.35rem}
+.text-button{background:none;border:0;color:var(--warm,#8a5a3a);text-decoration:underline;cursor:pointer;padding:0;font:inherit}
+.public-bib{max-width:52rem;margin:0 auto;padding:var(--space-8) var(--space-6)}

@@ -1,14 +1,17 @@
 import crypto from "node:crypto";
 import { z } from "zod";
-import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, filterCandidatesByAuthor, workImportId, normalizeCanonicalUrl } from "./imports.mjs";
+import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, gateCandidatesByAuthor, workImportId, normalizeCanonicalUrl } from "./imports.mjs";
 import { DEFAULT_LAYOUT } from "../shared/poetry.mjs";
 import { coverFromWork, firstImageUrl } from "../shared/manuscript.mjs";
+import { defaultCategories, normalizeCategories, inferCategoryId, categoryIdFromKind, labelForCategory } from "../shared/bibliography.mjs";
 
+const CATEGORY_IDS = defaultCategories().map(c => c.id);
 const input = z.object({
   title: z.string().trim().min(1, "Give this writing a title.").max(180),
   author: z.string().max(120).default(""),
   body: z.string().refine(s => Buffer.byteLength(s) <= 120000, "Keep each writing below 120 KB of text."),
   kind: z.enum(["poetry","story","essay","other"]).default("poetry"),
+  categoryId: z.string().max(40).optional().refine(v => v == null || v === "" || CATEGORY_IDS.includes(v), "Choose a bibliography category."),
   collection: z.string().max(80).default(""),
   theme: z.enum(["forest","clay","linen","night"]).default("forest"),
   coverUrl: z.string().max(2000).default(""),
@@ -22,18 +25,26 @@ const input = z.object({
   }).default(DEFAULT_LAYOUT),
 });
 const now = () => new Date().toISOString();
+const resolveCategoryId = (w, fields = {}) => {
+  const raw = fields.categoryId ?? w?.categoryId;
+  if (raw && CATEGORY_IDS.includes(raw)) return raw;
+  return categoryIdFromKind(fields.kind || w?.kind || "essay");
+};
 const metadata = w => ({
-  id:w.id, title:w.title, author:w.author, kind:w.kind, collection:w.collection, theme:w.theme,
+  id:w.id, title:w.title, author:w.author, kind:w.kind, categoryId: resolveCategoryId(w),
+  collection:w.collection, theme:w.theme,
   coverUrl: coverFromWork(w),
   archived:w.archived, version:w.version, updatedAt:w.updatedAt, example:w.example, shared:!!w.shareToken,
   platform:w.source?.platform, words:w.body.trim().split(/\s+/).filter(Boolean).length,
+  sourceUrl: w.source?.url || "",
+  publishedAt: w.source?.publishedAt || "",
 });
-const publicCopy = w => ({ id:w.id,title:w.title,author:w.author,kind:w.kind,body:w.body,theme:w.theme,collection:w.collection,layout:w.layout,coverUrl:coverFromWork(w),version:w.version,publishedAt:now() });
+const publicCopy = w => ({ id:w.id,title:w.title,author:w.author,kind:w.kind,categoryId:resolveCategoryId(w),body:w.body,theme:w.theme,collection:w.collection,layout:w.layout,coverUrl:coverFromWork(w),version:w.version,publishedAt:now() });
 const exportCopy = w => { const {shareToken,...copy} = w; return copy; };
 export const EXAMPLES = [
-  { title:"The space between",kind:"poetry",theme:"forest",collection:"Small observations",author:"A Writes example",body:"Not every silence\nis an empty room.\n\nSome are a window\nleft open\n    for the rain.\n\n[[page]]\n\nI am learning\nto leave a little space\nbetween the things I know.\n\nEnough for a seed.\nEnough for a question.\nEnough for you.",example:true },
-  { title:"A small atlas\nof home",kind:"story",theme:"clay",collection:"Small observations",author:"A Writes example",body:"The map her grandfather left behind had no roads.\n\nInstead, there were the places where things had happened: a first snow, a lost dog found, a very good sandwich.\n\nIn the corner, beneath a tiny drawing of the kitchen, he had written: Start here.\n\n[[page]]\n\nShe spread it on the table and took out a pencil.\n\nThe house had changed. The apple tree was gone. But the afternoon light still found the same patch of floor.\n\nShe drew a small square and wrote: Where I began again.",example:true },
-  { title:"Notes from\nthe margins",kind:"essay",theme:"linen",collection:"Field notes",author:"A Writes example",body:"There is a kind of thinking that only happens at the edge of a page.\n\nNot the polished thought, with its shoes on and somewhere to be. The other kind. The half-formed question. The sentence you underline for reasons you cannot quite explain.\n\nThis is a place to keep those things.\n\n[[page]]\n\nA notebook does not ask where a thought will be published. It simply makes room.\n\nThat seems like a useful quality for a digital space, too.",example:true },
+  { title:"The space between",kind:"poetry",categoryId:"poetry",theme:"forest",collection:"Small observations",author:"A Writes example",body:"Not every silence\nis an empty room.\n\nSome are a window\nleft open\n    for the rain.\n\n[[page]]\n\nI am learning\nto leave a little space\nbetween the things I know.\n\nEnough for a seed.\nEnough for a question.\nEnough for you.",example:true },
+  { title:"A small atlas\nof home",kind:"story",categoryId:"story",theme:"clay",collection:"Small observations",author:"A Writes example",body:"The map her grandfather left behind had no roads.\n\nInstead, there were the places where things had happened: a first snow, a lost dog found, a very good sandwich.\n\nIn the corner, beneath a tiny drawing of the kitchen, he had written: Start here.\n\n[[page]]\n\nShe spread it on the table and took out a pencil.\n\nThe house had changed. The apple tree was gone. But the afternoon light still found the same patch of floor.\n\nShe drew a small square and wrote: Where I began again.",example:true },
+  { title:"Notes from\nthe margins",kind:"essay",categoryId:"essay",theme:"linen",collection:"Field notes",author:"A Writes example",body:"There is a kind of thinking that only happens at the edge of a page.\n\nNot the polished thought, with its shoes on and somewhere to be. The other kind. The half-formed question. The sentence you underline for reasons you cannot quite explain.\n\nThis is a place to keep those things.\n\n[[page]]\n\nA notebook does not ask where a thought will be published. It simply makes room.\n\nThat seems like a useful quality for a digital space, too.",example:true },
 ];
 export class Writes {
   constructor(store, fetcher = safeFetch) { this.store = store; this.fetcher = fetcher; }
@@ -49,6 +60,14 @@ export class Writes {
     if (!work) fail("Writing not found.",404);
     return work;
   }
+  async bibliographySettings(owner) {
+    const row = await this.store.get(owner, "settings#bibliography");
+    return {
+      categories: normalizeCategories(row?.categories),
+      shareToken: row?.shareToken || "",
+      version: row?.version || 0,
+    };
+  }
   async save(owner, fields, old = null, extra = {}) {
     const validated = input.parse(fields), stamp = now();
     const coverUrl = coverFromWork({ ...old, ...validated, ...extra, source: extra.source || validated.source || old?.source })
@@ -57,7 +76,8 @@ export class Writes {
       || firstImageUrl(validated.body)
       || old?.coverUrl
       || "";
-    const w = { ...old, ...validated, ...extra, coverUrl, id:old?.id || extra.id || crypto.randomUUID(),createdAt:old?.createdAt || stamp,updatedAt:stamp,version:(old?.version||0)+1 };
+    const categoryId = resolveCategoryId(old, { ...validated, ...extra });
+    const w = { ...old, ...validated, ...extra, coverUrl, categoryId, id:old?.id || extra.id || crypto.randomUUID(),createdAt:old?.createdAt || stamp,updatedAt:stamp,version:(old?.version||0)+1 };
     if (Buffer.byteLength(JSON.stringify(w)) > 300000) fail("This piece and its source are too large to save together. Import a smaller plain-text section.");
     const ops = [{pk:owner,sk:"work#"+w.id,value:w,expected:old?.version||0}];
     if (old) ops.push({pk:owner,sk:`revision#${old.id}#${String(old.version).padStart(8,"0")}`,value:exportCopy(old),expected:0});
@@ -95,12 +115,78 @@ export class Writes {
     if (path.startsWith("/api/public/") && method === "GET") {
       const token = path.split("/").pop();
       if (!/^[a-zA-Z0-9_-]{32}$/.test(token)) fail("This shared writing is unavailable.",404);
+      const bib = await this.store.get("public#"+token,"bibliography");
+      if (bib) return { bibliography: bib };
       const w = await this.store.get("public#"+token,"snapshot");
       if (!w) fail("This shared writing is unavailable or its link was revoked.",404);
       return {work:w};
     }
     if (!owner) fail("Please sign in to your member account.",401);
     if (method === "GET" && path === "/api/works") return {works:(await this.store.list(owner,"work#")).map(metadata)};
+    if (method === "GET" && path === "/api/bibliography") {
+      const settings = await this.bibliographySettings(owner);
+      const works = (await this.store.list(owner,"work#")).filter(w => !w.archived);
+      const entries = works.map(w => {
+        const meta = metadata(w);
+        return {
+          id: meta.id,
+          title: meta.title,
+          author: meta.author,
+          categoryId: meta.categoryId,
+          categoryLabel: labelForCategory(settings.categories, meta.categoryId),
+          updatedAt: meta.updatedAt,
+          publishedAt: meta.publishedAt,
+          sourceUrl: meta.sourceUrl,
+          kind: meta.kind,
+          words: meta.words,
+        };
+      }).sort((a,b) => a.title.localeCompare(b.title));
+      const sections = settings.categories.map(cat => ({
+        ...cat,
+        entries: entries.filter(e => e.categoryId === cat.id),
+      }));
+      return { categories: settings.categories, sections, entries, shareToken: settings.shareToken || "" };
+    }
+    if (method === "PUT" && path === "/api/bibliography/categories") {
+      const categories = normalizeCategories(data.categories);
+      const prev = await this.store.get(owner, "settings#bibliography");
+      const next = { categories, shareToken: prev?.shareToken || "", version: (prev?.version || 0) + 1, updatedAt: now() };
+      await this.store.commit([{ pk: owner, sk: "settings#bibliography", value: next, expected: prev?.version || 0 }]);
+      return { categories: next.categories };
+    }
+    if (method === "POST" && path === "/api/bibliography/share") {
+      if (data.confirm !== true) fail("Confirm before creating a public bibliography link.");
+      const settings = await this.bibliographySettings(owner);
+      const token = settings.shareToken || crypto.randomBytes(24).toString("base64url");
+      const listing = await this.route(owner, "GET", "/api/bibliography", {}, actor);
+      const snapshot = {
+        title: data.title || "Bibliography",
+        author: actor?.display_name || actor?.displayName || actor?.username || "",
+        categories: listing.categories,
+        sections: listing.sections.map(s => ({
+          id: s.id, label: s.label, hint: s.hint,
+          entries: s.entries.map(e => ({ title: e.title, author: e.author, sourceUrl: e.sourceUrl, publishedAt: e.publishedAt })),
+        })),
+        publishedAt: now(),
+      };
+      const prev = await this.store.get(owner, "settings#bibliography");
+      const next = { categories: settings.categories, shareToken: token, version: (prev?.version || 0) + 1, updatedAt: now() };
+      await this.store.commit([
+        { pk: owner, sk: "settings#bibliography", value: next, expected: prev?.version || 0 },
+        { pk: "public#" + token, sk: "bibliography", value: snapshot },
+      ]);
+      return { token, bibliography: snapshot };
+    }
+    if (method === "DELETE" && path === "/api/bibliography/share") {
+      const prev = await this.store.get(owner, "settings#bibliography");
+      if (!prev?.shareToken) return { revoked: false };
+      const next = { categories: normalizeCategories(prev.categories), shareToken: "", version: (prev.version || 0) + 1, updatedAt: now() };
+      await this.store.commit([
+        { pk: owner, sk: "settings#bibliography", value: next, expected: prev.version || 0 },
+        { pk: "public#" + prev.shareToken, sk: "bibliography", remove: true },
+      ]);
+      return { revoked: true };
+    }
     if (method === "POST" && path === "/api/works/refresh-covers") {
       const works = await this.store.list(owner, "work#");
       let updated = 0, already = 0, missing = 0;
@@ -193,16 +279,19 @@ export class Writes {
         }
         if (!merged.length) fail("No articles were found across those publication feeds. Try a single publication /feed URL.");
         const authorsOnly = data.includeAllAuthors !== true;
+        const soleAuthor = data.soleAuthorExport === true;
         const aliases = collectAuthorAliases(actor || {}, resolved, owner, typeof data.authorFilter === "string" ? data.authorFilter : "");
-        const filtered = filterCandidatesByAuthor(merged, aliases, { authorsOnly });
-        if (filtered.filtered && !filtered.kept.length) {
-          fail(`No posts matched your author identity (${aliases.join(", ") || "unknown"}). ${filtered.skipped} post${filtered.skipped===1?"":"s"} by other authors were hidden. Enable “Import every author on this publication” only if you intend to copy co-authors’ writing.`);
+        const defaultAuthor = actor?.display_name || actor?.displayName || actor?.username || "";
+        const gated = gateCandidatesByAuthor(merged, aliases, { authorsOnly, soleAuthor, defaultAuthor });
+        if (gated.filtered && !gated.kept) {
+          fail(`No posts matched your author identity (${aliases.join(", ") || "unknown"}). Skipped ${gated.skippedOther} by other authors and ${gated.skippedMissing} with no byline. Enable “Import every author on this publication” only to copy co-authors’ writing.`);
         }
-        candidates = filtered.kept;
+        candidates = gated.filtered ? gated.candidates.filter(c => c.authorGate === "allow") : gated.candidates;
+        // Keep blocked posts out of the feed commit list (feeds can be large); counts go in the warning.
         source = {id:hash(resolved.label).slice(0,24),url:resolved.label,updatedAt:now(),version:1};
         if (resolved.handle) feedNote = `Loaded public publications from @${resolved.handle}. `;
-        if (filtered.filtered) {
-          feedNote += `Author filter on: showing posts matching ${aliases.join(" / ")}. Skipped ${filtered.skipped} by other authors. `;
+        if (gated.filtered) {
+          feedNote += `Author filter on: showing ${gated.kept} post${gated.kept===1?"":"s"} matching ${aliases.join(" / ")}. Skipped ${gated.skippedOther} by other authors` + (gated.skippedMissing ? `, ${gated.skippedMissing} with no byline` : "") + `. `;
         } else if (authorsOnly && !aliases.length) {
           feedNote += "Author filter idle (no member display name/username to match). Showing all posts from the feed. ";
         } else if (!authorsOnly) {
@@ -213,42 +302,58 @@ export class Writes {
         candidates = await parseZip(data.base64 || "", {
           substack: true,
           publicationUrl: data.publicationUrl || "",
-          defaultAuthor,
         });
         const authorsOnly = data.includeAllAuthors !== true;
+        const soleAuthor = data.soleAuthorExport === true;
         const aliases = collectAuthorAliases(actor || {}, {}, owner, typeof data.authorFilter === "string" ? data.authorFilter : "");
-        // Export ZIPs are owned by the member; blank bylines default to the member for author-only mode.
-        if (authorsOnly && aliases.length) {
-          candidates = candidates.map(c => c.author ? c : { ...c, author: defaultAuthor || aliases[0] });
-          const filtered = filterCandidatesByAuthor(candidates, aliases, { authorsOnly: true });
-          feedNote = `Substack export. Author filter on: showing posts matching ${aliases.join(" / ")}. Skipped ${filtered.skipped} by other authors. `;
-          candidates = filtered.kept;
-          if (!candidates.length) fail("No posts in this export matched your author identity.");
+        const gated = gateCandidatesByAuthor(candidates, aliases, { authorsOnly, soleAuthor, defaultAuthor });
+        // ZIP previews include blocked rows so James can see Samia/no-byline skips with counts.
+        candidates = gated.candidates;
+        if (gated.filtered) {
+          feedNote = `Substack export. Author filter on: ${gated.kept} matched ${aliases.join(" / ")}. Skipped ${gated.skippedOther} by other authors, ${gated.skippedMissing} with no byline` +
+            (soleAuthor ? " (blank bylines treated as yours — sole-author export)." : ". Substack ZIPs often omit authors — enable “This export is only my writing” only for a sole-author publication, or “Import every author” to copy co-authors.") + " ";
+          if (!gated.kept && !soleAuthor && !data.includeAllAuthors) {
+            // Still return blocked previews; do not fail — UI shows skips.
+          }
+        } else if (!authorsOnly) {
+          feedNote = "Substack export. Importing every author (opt-in). ";
         } else {
-          feedNote = "Substack export. ";
+          feedNote = "Substack export. Author filter idle (no member identity to match). ";
         }
         source = { id: hash("substack-export|" + (data.publicationUrl || data.name || "zip")).slice(0, 24), url: data.publicationUrl || "", updatedAt: now(), version: 1 };
       } else candidates = parseFile(data.name || "Pasted writing.txt",data.text || "");
       const jobId = crypto.randomUUID(), expiresAt = Math.floor(Date.now()/1000)+1800;
       const previews = [];
       for (const [index,c] of candidates.entries()) {
-        const found = await this.findExistingImport(owner, c);
+        const blocked = c.authorGate === "block";
+        const found = blocked ? { work: null, id: workImportId(c.source.key) } : await this.findExistingImport(owner, c);
         const existing = found.work;
         const id = found.id;
-        const status = !existing ? "new" : existing.source?.hash === c.source.hash ? "unchanged" : "changed";
+        const status = blocked ? "excluded" : !existing ? "new" : existing.source?.hash === c.source.hash ? "unchanged" : "changed";
         const entry = {
-          ...c,
+          ...(blocked ? { ...c, body: "", source: { ...c.source, original: "" } } : c),
           id,
           index,
           status,
           existingVersion: existing?.version || 0,
           expiresAt,
           version: 1,
-          coverUrl: c.coverUrl || firstImageUrl(c.body) || coverFromWork(c) || existing?.coverUrl || "",
+          coverUrl: blocked ? "" : (c.coverUrl || firstImageUrl(c.body) || coverFromWork(c) || existing?.coverUrl || ""),
         };
         if (Buffer.byteLength(JSON.stringify(entry)) > 300000) fail("An imported piece is too large. Import a smaller plain-text section.");
         await this.store.commit([{pk:owner,sk:`job#${jobId}#${index}`,value:entry,expected:0}]);
-        previews.push({index,title:c.title,author:c.author,body:c.body,status,platform:c.source.platform,existingBody:existing?.body,coverUrl:entry.coverUrl});
+        previews.push({
+          index,
+          title:c.title,
+          author:c.author,
+          body: blocked ? "" : c.body,
+          status,
+          platform:c.source.platform,
+          existingBody:existing?.body,
+          coverUrl: blocked ? "" : entry.coverUrl,
+          authorGate: c.authorGate || "allow",
+          authorNote: c.authorNote || "",
+        });
       }
       await this.store.commit([{pk:owner,sk:"job#"+jobId,value:{expiresAt,count:candidates.length,source,version:1},expected:0}]);
       return {jobId,candidates:previews,warning:data.googleDocUrl?"This is an independent text copy, not a live Google connection. Re-import using the same document address to review a later draft. Google’s revision history, comments, formatting, and media are not imported.":feedNote+"Duplicates match by canonical URL, Substack post id, or title+date against your library (including prior RSS/Medium imports). HTTPS images stay linked; ZIP exports do not include binary media files. Review the result against your original."};
@@ -263,12 +368,19 @@ export class Writes {
       const results = [];
       for (const index of selected) {
         const c = await this.store.get(owner,`job#${data.jobId}#${index}`);
+        if (c.authorGate === "block" || c.status === "excluded") { results.push({title:c.title,status:"excluded"}); continue; }
         const old = await this.store.get(owner,"work#"+c.id);
         if (old?.source?.hash === c.source.hash) { results.push({title:c.title,status:"skipped"}); continue; }
         if ((old?.version||0) !== c.existingVersion) { results.push({title:c.title,status:"conflict"}); continue; }
         if (old && !(data.approvedChanges||[]).includes(index)) { results.push({title:c.title,status:"needs-review"}); continue; }
         try {
-          await this.save(owner,{...c,...(old?{kind:old.kind,collection:old.collection,theme:old.theme,layout:old.layout,archived:old.archived}:{archived:false}),versionName:"",coverUrl:c.coverUrl||old?.coverUrl||""},old,{id:c.id,source:c.source,example:false,coverUrl:c.coverUrl||old?.coverUrl||""});
+          await this.save(owner,{
+            ...c,
+            ...(old?{kind:old.kind,collection:old.collection,theme:old.theme,layout:old.layout,archived:old.archived,categoryId:old.categoryId}:{archived:false}),
+            versionName:"",
+            coverUrl:c.coverUrl||old?.coverUrl||"",
+            categoryId: old?.categoryId || inferCategoryId({ kind: c.kind, title: c.title, platform: c.source?.platform, collection: c.collection }),
+          },old,{id:c.id,source:c.source,example:false,coverUrl:c.coverUrl||old?.coverUrl||""});
           results.push({title:c.title,status:old?"updated":"imported"});
         } catch(e) { if(e.status===409) results.push({title:c.title,status:"conflict"}); else throw e; }
       }

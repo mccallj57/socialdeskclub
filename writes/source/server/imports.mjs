@@ -128,24 +128,83 @@ export function collectAuthorAliases(actor = {}, resolved = {}, owner = "", extr
   }
   return aliases;
 }
+/**
+ * True only for a real byline match.
+ * - Exact normalized equality
+ * - Multi-word alias appears as a phrase in the byline
+ * - Single-token alias (len ≥ 4) equals a whole token of the byline (so "james" matches "James McCall", not "Samia")
+ * Empty bylines never match.
+ */
 export function authorMatches(itemAuthor, aliases) {
-  if (!aliases?.length) return true;
+  if (!aliases?.length) return false;
   const author = normalizeAuthor(itemAuthor);
   if (!author) return false;
   const tokens = author.split(" ").filter(Boolean);
   return aliases.some(alias => {
+    if (!alias) return false;
     if (author === alias) return true;
-    if (tokens.includes(alias)) return true;
-    if (alias.includes(" ") && author.includes(alias)) return true;
-    return false;
+    if (alias.includes(" ")) return author === alias || author.includes(alias);
+    // Single-token alias: require a full token match, ignore tiny stubs.
+    if (alias.length < 4) return false;
+    return tokens.includes(alias);
   });
 }
-export function filterCandidatesByAuthor(candidates, aliases, { authorsOnly = true } = {}) {
-  if (!authorsOnly || !aliases.length) {
-    return { kept: candidates, skipped: 0, aliases, filtered: false };
+/**
+ * Gate each candidate for author-only import.
+ * missing bylines are blocked unless soleAuthor (ZIP with no author column, sole-owned pub).
+ */
+export function gateCandidatesByAuthor(candidates, aliases, { authorsOnly = true, soleAuthor = false, defaultAuthor = "" } = {}) {
+  if (!authorsOnly) {
+    return {
+      candidates: candidates.map(c => ({ ...c, authorGate: "allow" })),
+      kept: candidates.length,
+      skippedOther: 0,
+      skippedMissing: 0,
+      aliases,
+      filtered: false,
+    };
   }
-  const kept = candidates.filter(c => authorMatches(c.author, aliases));
-  return { kept, skipped: candidates.length - kept.length, aliases, filtered: true };
+  if (!aliases.length) {
+    return {
+      candidates: candidates.map(c => ({ ...c, authorGate: "allow" })),
+      kept: candidates.length,
+      skippedOther: 0,
+      skippedMissing: 0,
+      aliases,
+      filtered: false,
+    };
+  }
+  let kept = 0, skippedOther = 0, skippedMissing = 0;
+  const out = candidates.map(c => {
+    const byline = normalizeAuthor(c.author);
+    if (!byline) {
+      if (soleAuthor) {
+        kept += 1;
+        return {
+          ...c,
+          author: c.author || defaultAuthor || aliases[0],
+          authorGate: "allow",
+          authorNote: "no byline — treated as yours (sole-author export)",
+        };
+      }
+      skippedMissing += 1;
+      return { ...c, authorGate: "block", authorNote: "no byline in source" };
+    }
+    if (authorMatches(c.author, aliases)) {
+      kept += 1;
+      return { ...c, authorGate: "allow" };
+    }
+    skippedOther += 1;
+    return { ...c, authorGate: "block", authorNote: `by ${String(c.author).trim()}` };
+  });
+  return { candidates: out, kept, skippedOther, skippedMissing, aliases, filtered: true };
+}
+/** @deprecated use gateCandidatesByAuthor — kept for tests that expect kept/skipped only */
+export function filterCandidatesByAuthor(candidates, aliases, { authorsOnly = true } = {}) {
+  const gated = gateCandidatesByAuthor(candidates, aliases, { authorsOnly, soleAuthor: false });
+  if (!gated.filtered) return { kept: candidates, skipped: 0, aliases, filtered: false };
+  const kept = gated.candidates.filter(c => c.authorGate === "allow");
+  return { kept, skipped: gated.skippedOther + gated.skippedMissing, aliases, filtered: true };
 }
 async function defaultJsonFetch(url) {
   const host = new URL(url).hostname;
@@ -407,7 +466,7 @@ export function parseSubstackExport(files, { publicationUrl = "", defaultAuthor 
     const body = htmlText(html);
     if (!body.trim()) continue;
     const url = publicationPostUrl(publicationUrl, postId);
-    const author = String(row.author || row.writer || defaultAuthor || "").trim();
+    const author = String(row.author || row.writer || "").trim();
     out.push(candidate({
       title,
       author,
