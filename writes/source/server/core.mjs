@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { z } from "zod";
-import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, gateCandidatesByAuthor, workImportId, normalizeCanonicalUrl } from "./imports.mjs";
+import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, gateCandidatesByAuthor, workImportId, normalizeCanonicalUrl, enrichSubstackAuthors } from "./imports.mjs";
 import { DEFAULT_LAYOUT } from "../shared/poetry.mjs";
 import { coverFromWork, firstImageUrl } from "../shared/manuscript.mjs";
 import { defaultCategories, normalizeCategories, inferCategoryId, categoryIdFromKind, labelForCategory } from "../shared/bibliography.mjs";
@@ -303,22 +303,29 @@ export class Writes {
           substack: true,
           publicationUrl: data.publicationUrl || "",
         });
+        let enrichNote = "";
+        if (data.publicationUrl) {
+          const enriched = await enrichSubstackAuthors(candidates, {
+            publicationUrl: data.publicationUrl,
+            feedFetch: this.fetcher,
+          });
+          candidates = enriched.candidates;
+          enrichNote = enriched.note;
+        }
         const authorsOnly = data.includeAllAuthors !== true;
         const soleAuthor = data.soleAuthorExport === true;
         const aliases = collectAuthorAliases(actor || {}, {}, owner, typeof data.authorFilter === "string" ? data.authorFilter : "");
         const gated = gateCandidatesByAuthor(candidates, aliases, { authorsOnly, soleAuthor, defaultAuthor });
         // ZIP previews include blocked rows so James can see Samia/no-byline skips with counts.
         candidates = gated.candidates;
+        feedNote = enrichNote;
         if (gated.filtered) {
-          feedNote = `Substack export. Author filter on: ${gated.kept} matched ${aliases.join(" / ")}. Skipped ${gated.skippedOther} by other authors, ${gated.skippedMissing} with no byline` +
-            (soleAuthor ? " (blank bylines treated as yours — sole-author export)." : ". Substack ZIPs often omit authors — enable “This export is only my writing” only for a sole-author publication, or “Import every author” to copy co-authors.") + " ";
-          if (!gated.kept && !soleAuthor && !data.includeAllAuthors) {
-            // Still return blocked previews; do not fail — UI shows skips.
-          }
+          feedNote += `Substack export. Author filter on: ${gated.kept} matched ${aliases.join(" / ")}. Skipped ${gated.skippedOther} by other authors, ${gated.skippedMissing} with no byline` +
+            (soleAuthor ? " (blank bylines treated as yours — sole-author export)." : ". Paste the publication homepage so Writes can look up authors from Substack; use “Import every author” only for co-authors, or “only my writing” for sole-author pubs without live lookup.") + " ";
         } else if (!authorsOnly) {
-          feedNote = "Substack export. Importing every author (opt-in). ";
+          feedNote += "Substack export. Importing every author (opt-in). ";
         } else {
-          feedNote = "Substack export. Author filter idle (no member identity to match). ";
+          feedNote += "Substack export. Author filter idle (no member identity to match). ";
         }
         source = { id: hash("substack-export|" + (data.publicationUrl || data.name || "zip")).slice(0, 24), url: data.publicationUrl || "", updatedAt: now(), version: 1 };
       } else candidates = parseFile(data.name || "Pasted writing.txt",data.text || "");
