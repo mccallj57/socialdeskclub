@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, filterCandidatesByAuthor, workImportId, normalizeCanonicalUrl } from "./imports.mjs";
 import { DEFAULT_LAYOUT } from "../shared/poetry.mjs";
-import { firstImageUrl } from "../shared/manuscript.mjs";
+import { coverFromWork, firstImageUrl } from "../shared/manuscript.mjs";
 
 const input = z.object({
   title: z.string().trim().min(1, "Give this writing a title.").max(180),
@@ -24,11 +24,11 @@ const input = z.object({
 const now = () => new Date().toISOString();
 const metadata = w => ({
   id:w.id, title:w.title, author:w.author, kind:w.kind, collection:w.collection, theme:w.theme,
-  coverUrl: w.coverUrl || firstImageUrl(w.body) || "",
+  coverUrl: coverFromWork(w),
   archived:w.archived, version:w.version, updatedAt:w.updatedAt, example:w.example, shared:!!w.shareToken,
   platform:w.source?.platform, words:w.body.trim().split(/\s+/).filter(Boolean).length,
 });
-const publicCopy = w => ({ id:w.id,title:w.title,author:w.author,kind:w.kind,body:w.body,theme:w.theme,collection:w.collection,layout:w.layout,coverUrl:w.coverUrl||firstImageUrl(w.body)||"",version:w.version,publishedAt:now() });
+const publicCopy = w => ({ id:w.id,title:w.title,author:w.author,kind:w.kind,body:w.body,theme:w.theme,collection:w.collection,layout:w.layout,coverUrl:coverFromWork(w),version:w.version,publishedAt:now() });
 const exportCopy = w => { const {shareToken,...copy} = w; return copy; };
 export const EXAMPLES = [
   { title:"The space between",kind:"poetry",theme:"forest",collection:"Small observations",author:"A Writes example",body:"Not every silence\nis an empty room.\n\nSome are a window\nleft open\n    for the rain.\n\n[[page]]\n\nI am learning\nto leave a little space\nbetween the things I know.\n\nEnough for a seed.\nEnough for a question.\nEnough for you.",example:true },
@@ -51,7 +51,12 @@ export class Writes {
   }
   async save(owner, fields, old = null, extra = {}) {
     const validated = input.parse(fields), stamp = now();
-    const coverUrl = normalizeCanonicalUrl(validated.coverUrl) || normalizeCanonicalUrl(extra.coverUrl) || firstImageUrl(validated.body) || old?.coverUrl || "";
+    const coverUrl = coverFromWork({ ...old, ...validated, ...extra, source: extra.source || validated.source || old?.source })
+      || normalizeCanonicalUrl(validated.coverUrl)
+      || normalizeCanonicalUrl(extra.coverUrl)
+      || firstImageUrl(validated.body)
+      || old?.coverUrl
+      || "";
     const w = { ...old, ...validated, ...extra, coverUrl, id:old?.id || extra.id || crypto.randomUUID(),createdAt:old?.createdAt || stamp,updatedAt:stamp,version:(old?.version||0)+1 };
     if (Buffer.byteLength(JSON.stringify(w)) > 300000) fail("This piece and its source are too large to save together. Import a smaller plain-text section.");
     const ops = [{pk:owner,sk:"work#"+w.id,value:w,expected:old?.version||0}];
@@ -96,6 +101,20 @@ export class Writes {
     }
     if (!owner) fail("Please sign in to your member account.",401);
     if (method === "GET" && path === "/api/works") return {works:(await this.store.list(owner,"work#")).map(metadata)};
+    if (method === "POST" && path === "/api/works/refresh-covers") {
+      const works = await this.store.list(owner, "work#");
+      let updated = 0, already = 0, missing = 0;
+      for (const work of works) {
+        const next = coverFromWork(work);
+        if (!next) { missing += 1; continue; }
+        if (String(work.coverUrl || "") === next) { already += 1; continue; }
+        const stamp = now();
+        const saved = { ...work, coverUrl: next, updatedAt: stamp, version: (work.version || 0) + 1 };
+        await this.store.commit([{ pk: owner, sk: "work#" + work.id, value: saved, expected: work.version || 0 }]);
+        updated += 1;
+      }
+      return { updated, already, missing, total: works.length };
+    }
     if (method === "POST" && path === "/api/works") {
       if ((await this.store.list(owner,"work#")).length >= 500) fail("This workspace is limited to 500 writings in this first release.");
       return {work:await this.save(owner,data)};
@@ -225,7 +244,7 @@ export class Writes {
           existingVersion: existing?.version || 0,
           expiresAt,
           version: 1,
-          coverUrl: c.coverUrl || firstImageUrl(c.body) || existing?.coverUrl || "",
+          coverUrl: c.coverUrl || firstImageUrl(c.body) || coverFromWork(c) || existing?.coverUrl || "",
         };
         if (Buffer.byteLength(JSON.stringify(entry)) > 300000) fail("An imported piece is too large. Import a smaller plain-text section.");
         await this.store.commit([{pk:owner,sk:`job#${jobId}#${index}`,value:entry,expected:0}]);

@@ -64,12 +64,28 @@ function App(){
   const [versionName,setVersionName]=useState("");
   const [apiReady,setApiReady]=useState(cfg.mode!=="production");
   const bodyRef=useRef(null);
+  const coversRefreshed=useRef(false);
   const dirty=!!work&&JSON.stringify(work)!==saved;
   function notice(s){setToast(s);setTimeout(()=>setToast(""),4500);}
   async function attempt(fn){setError("");setBusy(true);try{return await fn();}catch(e){setError(e.message);return null;}finally{setBusy(false);}}
-  async function refresh(){const [a,b]=await Promise.all([api("/works"),api("/sources")]);setWorks(a.works);setSources(b.sources);}
+  async function refresh({backfillCovers=false}={}){
+    const [a,b]=await Promise.all([api("/works"),api("/sources")]);
+    let list=a.works;
+    if(backfillCovers&&!coversRefreshed.current&&list.some(w=>!w.coverUrl)){
+      coversRefreshed.current=true;
+      try{
+        const out=await api("/works/refresh-covers","POST",{});
+        if(out.updated>0){
+          list=(await api("/works")).works;
+          notice(out.updated===1?"Found a cover image for 1 piece on your shelf.":`Found cover images for ${out.updated} pieces on your shelf.`);
+        }
+      }catch{/* older Lambda without refresh-covers — list already backfills when possible */}
+    }
+    setWorks(list);setSources(b.sources);
+  }
   function signOut(){
     if(dirty&&!window.confirm("Sign out and discard unsaved changes? Your last saved version will remain."))return;
+    coversRefreshed.current=false;
     setToken("");setUser(null);setWorks([]);setSources([]);setWork(null);setSaved("");setView("library");setReader(null);setModal("");setError("");notice("Signed out of Writes.");
   }
   async function boot(){
@@ -84,14 +100,14 @@ function App(){
         if(TOKEN){
           try{
             const data=await api("/bootstrap");
-            setUser(data.user);await refresh();
+            setUser(data.user);await refresh({backfillCovers:true});
           }catch{
             setToken("");setUser(null);
           }
         }
         setLoading(false);return;
       }
-      const data=await api("/bootstrap");setToken(data.token);setUser(data.user);await refresh();
+      const data=await api("/bootstrap");setToken(data.token);setUser(data.user);await refresh({backfillCovers:true});
     }catch(e){setError(e.message);}finally{setLoading(false);}
   }
   useEffect(()=>{boot();const onHash=()=>boot();window.addEventListener("hashchange",onHash);return()=>window.removeEventListener("hashchange",onHash);},[]);
@@ -169,7 +185,7 @@ function App(){
       if(!out?.token)throw new Error("Sign-in did not return a session token.");
       setToken(out.token);
       try{
-        await refresh();
+        await refresh({backfillCovers:true});
       }catch(err){
         setToken("");
         throw new Error("Signed in, but Writes could not open your library ("+(err.message||"unauthorized")+").");
