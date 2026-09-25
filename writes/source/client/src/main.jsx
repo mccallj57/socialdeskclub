@@ -4,7 +4,7 @@ import { BookOpen, Feather, Library, Plus, ArrowUpRight, ArrowLeft, ArrowRight, 
 import JSZip from "jszip";
 import { DEFAULT_LAYOUT, bookPages, stanzaParts } from "../../shared/poetry.mjs";
 import { htmlFromManuscript } from "../../shared/manuscript.mjs";
-import { defaultCategories, categoryIdFromKind } from "../../shared/bibliography.mjs";
+import { defaultCategories, categoryIdFromKind, resolveBiblioFields } from "../../shared/bibliography.mjs";
 import { LayoutControls, VerseArranger, VerseText } from "./PoetryTools.jsx";
 import "./style.css";
 import "./poetry.css";
@@ -32,12 +32,12 @@ async function api(path, method = "GET", data) {
   }
   return out;
 }
-const emptyWork = () => ({title:"",author:"",body:"",kind:"poetry",categoryId:"poetry",collection:"",theme:"forest",archived:false,layout:{...DEFAULT_LAYOUT},versionName:""});
+const emptyWork = () => ({title:"",author:"",body:"",kind:"poetry",categoryId:"poetry",collection:"",theme:"forest",archived:false,layout:{...DEFAULT_LAYOUT},versionName:"",publishedAt:"",writtenAt:"",venue:"",venueUrl:"",draftOf:"",draftNote:""});
 const kinds = {poetry:"Poetry",story:"Stories (narrative / fiction)",essay:"Essays (nonfiction)",other:"Other writing"};
 const kindHints = {poetry:"Verse and poems",story:"Narrative or fiction — rename the bibliography label to Fiction if you like",essay:"Nonfiction reflections and commentary",other:"Anything that doesn’t fit the others"};
 const countWords = text => text.trim().split(/\s+/).filter(Boolean).length;
-const dateLabel = date => new Date(date).toLocaleDateString(undefined,{month:"short",day:"numeric"});
-const yearLabel = date => { const d=new Date(date); return Number.isNaN(d.getTime())?"":String(d.getFullYear()); };
+const dateLabel = date => { const d=new Date(date); return Number.isNaN(d.getTime())?"":d.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}); };
+const dateInputValue = date => { const d=String(date||"").trim(); if(/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0,10); const t=new Date(d); return Number.isNaN(t.getTime())?"":t.toISOString().slice(0,10); };
 const esc = s => String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,65)||"untitled";
 const coverFor = w => {
@@ -67,12 +67,17 @@ function App(){
   const [username,setUsername]=useState(""),[password,setPassword]=useState("");
   const [versionName,setVersionName]=useState("");
   const [apiReady,setApiReady]=useState(cfg.mode!=="production");
+  const [linkedDrafts,setLinkedDrafts]=useState([]);
+  const [draftNoteInput,setDraftNoteInput]=useState("");
+  const [draftPrimaryId,setDraftPrimaryId]=useState("");
+  const [draftWrittenAt,setDraftWrittenAt]=useState("");
   const bodyRef=useRef(null);
   const coversRefreshed=useRef(false);
+  const biblioBackfilled=useRef(false);
   const dirty=!!work&&JSON.stringify(work)!==saved;
   function notice(s){setToast(s);setTimeout(()=>setToast(""),4500);}
   async function attempt(fn){setError("");setBusy(true);try{return await fn();}catch(e){setError(e.message);return null;}finally{setBusy(false);}}
-  async function refresh({backfillCovers=false}={}){
+  async function refresh({backfillCovers=false,backfillBiblio=false}={}){
     const [a,b]=await Promise.all([api("/works"),api("/sources")]);
     let list=a.works;
     if(backfillCovers&&!coversRefreshed.current&&list.some(w=>!w.coverUrl)){
@@ -85,6 +90,13 @@ function App(){
         }
       }catch{/* older Lambda without refresh-covers — list already backfills when possible */}
     }
+    if(backfillBiblio&&!biblioBackfilled.current&&list.some(w=>!w.venue||!w.publishedAt)){
+      biblioBackfilled.current=true;
+      try{
+        const out=await api("/works/backfill-biblio","POST",{});
+        if(out.updated>0) list=(await api("/works")).works;
+      }catch{/* older Lambda */}
+    }
     setWorks(list);setSources(b.sources);
     try{
       const bib=await api("/bibliography");
@@ -94,7 +106,7 @@ function App(){
   }
   function signOut(){
     if(dirty&&!window.confirm("Sign out and discard unsaved changes? Your last saved version will remain."))return;
-    coversRefreshed.current=false;
+    coversRefreshed.current=false;biblioBackfilled.current=false;
     setToken("");setUser(null);setWorks([]);setSources([]);setBibliography(null);setWork(null);setSaved("");setView("library");setReader(null);setPublicBib(null);setModal("");setError("");notice("Signed out of Writes.");
   }
   async function boot(){
@@ -113,14 +125,14 @@ function App(){
         if(TOKEN){
           try{
             const data=await api("/bootstrap");
-            setUser(data.user);await refresh({backfillCovers:true});
+            setUser(data.user);await refresh({backfillCovers:true,backfillBiblio:true});
           }catch{
             setToken("");setUser(null);
           }
         }
         setLoading(false);return;
       }
-      const data=await api("/bootstrap");setToken(data.token);setUser(data.user);await refresh({backfillCovers:true});
+      const data=await api("/bootstrap");setToken(data.token);setUser(data.user);await refresh({backfillCovers:true,backfillBiblio:true});
     }catch(e){setError(e.message);}finally{setLoading(false);}
   }
   useEffect(()=>{boot();const onHash=()=>boot();window.addEventListener("hashchange",onHash);return()=>window.removeEventListener("hashchange",onHash);},[]);
@@ -129,8 +141,15 @@ function App(){
   const abandon=()=>!dirty||window.confirm("Discard these unsaved changes? Your last saved version will remain.");
   function library(next="all"){if(!abandon())return;setWork(null);setView("library");setFilter(next);setQuery("");}
   async function openBibliography(){if(!abandon())return;await attempt(async()=>{const bib=await api("/bibliography");setBibliography(bib);setBibLabels(bib.categories||defaultCategories());setWork(null);setView("bibliography");});}
-  function newWork(){if(!abandon())return;const w=emptyWork();setWork(w);setSaved(JSON.stringify(w));setView("editor");}
-  async function edit(id){if(!abandon())return;await attempt(async()=>{const {work:w}=await api("/works/"+id);if(!w.categoryId)w.categoryId=categoryIdFromKind(w.kind);setWork(w);setSaved(JSON.stringify(w));setView("editor");});}
+  function newWork(){if(!abandon())return;const w=emptyWork();setWork(w);setSaved(JSON.stringify(w));setLinkedDrafts([]);setView("editor");}
+  async function loadDraftsFor(id){
+    if(!id){setLinkedDrafts([]);return;}
+    try{
+      const out=await api("/works/"+id+"/drafts");
+      setLinkedDrafts(out.drafts||[]);
+    }catch{setLinkedDrafts([]);}
+  }
+  async function edit(id){if(!abandon())return;await attempt(async()=>{const {work:w}=await api("/works/"+id);if(!w.categoryId)w.categoryId=categoryIdFromKind(w.kind);const bib=resolveBiblioFields(w);w.publishedAt=w.publishedAt||bib.publishedAt;w.writtenAt=w.writtenAt||bib.writtenAt;w.venue=w.venue||bib.venue;w.venueUrl=w.venueUrl||bib.venueUrl;setWork(w);setSaved(JSON.stringify(w));setView("editor");await loadDraftsFor(w.draftOf?"":w.id);});}
   function change(field,value){
     setWork(w=>{
       const next={...w,[field]:value};
@@ -143,7 +162,35 @@ function App(){
   async function save(label=""){
     return attempt(async()=>{
       const {work:w}=await api(work.id?"/works/"+work.id:"/works",work.id?"PUT":"POST",{...work,versionName:typeof label==="string"?label:""});
-      setWork(w);setSaved(JSON.stringify(w));await refresh();notice("Saved to your private library.");return w;
+      setWork(w);setSaved(JSON.stringify(w));await refresh();if(!w.draftOf)await loadDraftsFor(w.id);notice("Saved to your private library.");return w;
+    });
+  }
+  async function archiveCurrentAsDraft(){
+    if(!work?.id)return;
+    if(dirty&&!window.confirm("Save changes first? Unsaved edits will not be copied into the archived draft."))return;
+    await attempt(async()=>{
+      if(dirty)await save();
+      const out=await api("/works/"+work.id+"/archive-as-draft","POST",{note:draftNoteInput||"Earlier draft",writtenAt:draftWrittenAt||undefined});
+      setDraftNoteInput("");setDraftWrittenAt("");setModal("");
+      await loadDraftsFor(work.id);await refresh();
+      notice("Current text archived as a draft under this piece. Keep editing the primary.");
+      return out;
+    });
+  }
+  async function linkAsDraft(){
+    if(!work?.id||!draftPrimaryId)return;
+    await attempt(async()=>{
+      const out=await api("/works/"+work.id+"/link-draft","POST",{primaryId:draftPrimaryId,note:draftNoteInput,writtenAt:draftWrittenAt||undefined});
+      setWork(out.work);setSaved(JSON.stringify(out.work));setDraftNoteInput("");setDraftPrimaryId("");setDraftWrittenAt("");setModal("");setLinkedDrafts([]);
+      await refresh();notice("Linked as an archived draft. It no longer appears on the main shelf or bibliography.");
+    });
+  }
+  async function unlinkDraft(restore=false){
+    if(!work?.id||!work.draftOf)return;
+    await attempt(async()=>{
+      const out=await api("/works/"+work.id+"/unlink-draft","POST",{restore});
+      setWork(out.work);setSaved(JSON.stringify(out.work));await refresh();
+      notice(restore?"Draft unlinked and restored to your library.":"Draft unlinked; still archived.");
     });
   }
   async function preview(w,from){
@@ -207,7 +254,7 @@ function App(){
       if(!out?.token)throw new Error("Sign-in did not return a session token.");
       setToken(out.token);
       try{
-        await refresh({backfillCovers:true});
+        await refresh({backfillCovers:true,backfillBiblio:true});
       }catch(err){
         setToken("");
         throw new Error("Signed in, but Writes could not open your library ("+(err.message||"unauthorized")+").");
@@ -269,21 +316,21 @@ function App(){
       <button className="sidebar-export" disabled={busy||!works.length} onClick={()=>exportWorks(works.map(w=>w.id))}><Download size={18}/>Export my library</button>
     </aside>
     {view==="bibliography"?<main className="library bibliography-view">
-      <div className="page-heading"><div><p className="eyebrow">WRITES / BIBLIOGRAPHY</p><h1>A living bibliography.</h1><p className="lede">Your library, listed by category. Rename labels anytime — Stories can become Fiction without moving a single piece.</p></div><div className="heading-actions"><Button icon={Link2} onClick={shareBibliography} disabled={busy}>Share bibliography</Button><Button icon={RefreshCw} onClick={openBibliography} disabled={busy}>Refresh</Button></div></div>
-      {bibliography?.shareToken&&<p className="callout">Public link (titles only): <a href={location.href.split("#")[0]+"#share="+bibliography.shareToken} target="_blank" rel="noreferrer">{location.href.split("#")[0]+"#share="+bibliography.shareToken}</a> · <button type="button" className="text-button" onClick={revokeBibliography}>Revoke</button></p>}
+      <div className="page-heading"><div><p className="eyebrow">WRITES / BIBLIOGRAPHY</p><h1>A living bibliography.</h1><p className="lede">CV-style listings with date, venue, and category. Rename labels anytime — Stories can become Fiction without moving a single piece.</p></div><div className="heading-actions"><Button icon={Link2} onClick={shareBibliography} disabled={busy}>Share bibliography</Button><Button icon={RefreshCw} onClick={openBibliography} disabled={busy}>Refresh</Button></div></div>
+      {bibliography?.shareToken&&<p className="callout">Public link (titles, dates, venues): <a href={location.href.split("#")[0]+"#share="+bibliography.shareToken} target="_blank" rel="noreferrer">{location.href.split("#")[0]+"#share="+bibliography.shareToken}</a> · <button type="button" className="text-button" onClick={revokeBibliography}>Revoke</button></p>}
       <section className="sources-panel bib-labels"><div className="section-label"><h2>Category labels</h2><span>Ids stay stable; only names change</span></div>
         <div className="bib-label-grid">{categoryOptions.map((c,i)=><label key={c.id}><span>{c.id}</span><input maxLength={60} value={bibLabels[i]?.label??c.label} onChange={e=>setBibLabels(list=>list.map((row,idx)=>idx===i?{...row,label:e.target.value}:row))}/><small>{bibLabels[i]?.hint||c.hint}</small></label>)}</div>
         <div className="modal-actions" style={{justifyContent:"flex-start"}}><Button variant="primary" disabled={busy} onClick={saveBibLabels}>Save labels</Button></div>
-        <p className="fineprint">Essays ≈ nonfiction. Stories ≈ narrative/fiction. Scholarly papers, speeches, interviews, and blog stand alone. Assign a category on each piece in the editor.</p>
+        <p className="fineprint">Each entry can carry published/written date and where it appeared (Farmapper, Maisa Space, Medium…). Archived drafts stay off this list. Edit dates and venues on each piece.</p>
       </section>
       {(bibliography?.sections||[]).map(section=>(
         <section className="bib-section" key={section.id}>
           <div className="section-label"><h2>{section.label}</h2><span>{section.entries.length}</span></div>
           {section.hint&&<p className="fineprint">{section.hint}</p>}
-          {section.entries.length?<ul className="bib-list">{section.entries.map(e=><li key={e.id}><div><strong>{e.title}</strong><small>{e.author||"By you"}{e.publishedAt?` · ${yearLabel(e.publishedAt)||dateLabel(e.publishedAt)}`:""}{e.sourceUrl?<> · <a href={e.sourceUrl} target="_blank" rel="noreferrer">Source</a></>:null}</small></div><button className="edit-link" type="button" onClick={()=>edit(e.id)}>Open <ArrowUpRight size={15}/></button></li>)}</ul>:<p className="fineprint">Nothing in this category yet.</p>}
+          {section.entries.length?<ul className="bib-list">{section.entries.map(e=><li key={e.id}><div><strong>{e.title}</strong><small>{e.author||"By you"}{e.venue?` · ${e.venue}`:""}{e.publishedAt?` · ${dateLabel(e.publishedAt)}`:e.writtenAt?` · written ${dateLabel(e.writtenAt)}`:""}{(e.venueUrl||e.sourceUrl)?<> · <a href={e.venueUrl||e.sourceUrl} target="_blank" rel="noreferrer">Link</a></>:null}</small></div><button className="edit-link" type="button" onClick={()=>edit(e.id)}>Open <ArrowUpRight size={15}/></button></li>)}</ul>:<p className="fineprint">Nothing in this category yet.</p>}
         </section>
       ))}
-      <footer><span><Lock size={13}/>Bibliography shares list titles only</span><span>Assign categories in the editor.</span></footer>
+      <footer><span><Lock size={13}/>Bibliography shares list titles, dates, and venues — not full drafts</span><span>Assign categories, dates, and venues in the editor.</span></footer>
     </main>:view==="library"?<main className="library">
       <div className="page-heading"><div><p className="eyebrow">WRITES / {filter==="all"?"YOUR LIBRARY":nav.find(n=>n[0]===filter)?.[1].toUpperCase()}</p><h1>{filter==="all"?"A home for your words.":filter==="sources"?"Bring your writing home.":nav.find(n=>n[0]===filter)?.[1]}</h1><p className="lede">{filter==="sources"?"Import from a publication, an export file, or the page in front of you.":"Poems, stories, and things not quite named yet. All in one place."}</p></div><div className="heading-actions"><Button icon={Upload} onClick={()=>setModal("import")}>Import writing</Button><Button icon={Plus} variant="primary" onClick={newWork}>New writing</Button></div></div>
       {cfg.mode!=="production"&&<div className="preview-note"><span className="status-dot"/>Your own preview workspace. The sample books are examples, not imported member writing.</div>}
@@ -291,7 +338,7 @@ function App(){
       <><div className="library-tools"><div className="section-label"><h2>{filter==="all"?"On your shelf":nav.find(n=>n[0]===filter)?.[1]}</h2><span>{filtered.length} {filtered.length===1?"piece":"pieces"}</span></div><label className="search-field"><Search size={17}/><input aria-label="Find in your library" placeholder="Find a title, author, or collection" value={query} onChange={e=>setQuery(e.target.value)}/>{query&&<button className="icon-button" aria-label="Clear search" onClick={()=>setQuery("")}><X size={16}/></button>}</label></div>
       <div className="book-grid">{filtered.map((w,i)=><article className="book-card" key={w.id}>
         <button className={"book-cover "+w.theme+(coverFor(w)?" has-art":"")} style={coverFor(w)?{backgroundImage:`linear-gradient(180deg,rgba(20,28,22,.15),rgba(20,28,22,.78)),url(${coverFor(w)})`}:undefined} onClick={()=>cardPreview(w.id)} aria-label={"Read "+w.title}><span className="cover-top">{w.kind==="poetry"?"A COLLECTION OF POEMS":w.kind==="story"?"A SHORT STORY":w.kind==="essay"?"NOTES & REFLECTIONS":"COLLECTED WRITING"}</span><span className="cover-rule"/><span className="cover-title">{w.title}</span><span className="cover-author">{w.author||"By you"}</span><span className="cover-bottom"><span>WRITES</span><span>{String(i+1).padStart(2,"0")}</span></span><span className="read-overlay"><BookOpen size={16}/>Open book</span></button>
-        <div className="book-meta"><div><span className="book-type">{kinds[w.kind]}</span><span>{w.example?"Example":w.platform||"Original"}{w.shared?" · Shared":" · Private"}</span></div><button className="edit-link" onClick={()=>edit(w.id)}>Open editor <ArrowUpRight size={15}/></button><div className="book-date">{w.words} words<span>{dateLabel(w.updatedAt)}</span></div></div>
+        <div className="book-meta"><div><span className="book-type">{kinds[w.kind]}</span><span>{w.isDraft?"Archived draft":w.example?"Example":w.venue||w.platform||"Original"}{w.shared?" · Shared":w.isDraft?"":" · Private"}</span></div><button className="edit-link" onClick={()=>edit(w.id)}>Open editor <ArrowUpRight size={15}/></button><div className="book-date">{w.words} words<span>{w.publishedAt?dateLabel(w.publishedAt):dateLabel(w.updatedAt)}</span></div></div>
       </article>)}{filter==="all"&&!query&&<button className="new-book" onClick={newWork}><span className="new-book-icon"><Plus size={28} strokeWidth={1}/></span><strong>The next page<br/>is yours.</strong><span>Start something new <ArrowUpRight size={16}/></span></button>}</div>
       {!filtered.length&&(query||filter!=="all")&&<div className="empty-state"><BookOpen size={28}/><h2>{query?"No writing matches that search.":"A little room for something new."}</h2><p>{query?"Try a different title, author, or collection.":"Your saved writing will appear on this shelf."}</p><Button onClick={newWork} icon={Plus}>New writing</Button></div>}
       <div className="library-bottom"><div><span className="eyebrow">FROM ANYWHERE. FOR KEEPS.</span><h2>Your writing shouldn’t live on borrowed time.</h2><p>Bring your posts in from Medium, Substack, or a file. Keep an independent text copy, then make it your own.</p></div><Button icon={ArrowRight} onClick={()=>setModal("import")}>Bring a piece over</Button></div></>}
@@ -305,20 +352,35 @@ function App(){
       </section><aside className="editor-settings"><h2>Make it yours</h2><label>Writing type<select value={work.kind} onChange={e=>change("kind",e.target.value)}>{Object.entries(kinds).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label><p className="fineprint">{kindHints[work.kind]}</p>
         <label>Bibliography category<select value={work.categoryId||categoryIdFromKind(work.kind)} onChange={e=>change("categoryId",e.target.value)}>{categoryOptions.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}</select></label>
         <p className="fineprint">{categoryOptions.find(c=>c.id===(work.categoryId||categoryIdFromKind(work.kind)))?.hint||"Appears under this heading in your living bibliography."}</p>
+        <label>Published date<input type="date" value={dateInputValue(work.publishedAt)} onChange={e=>change("publishedAt",e.target.value)}/></label>
+        <label>Written date<input type="date" value={dateInputValue(work.writtenAt)} onChange={e=>change("writtenAt",e.target.value)}/></label>
+        <p className="fineprint">Published date comes from Substack/Medium when known. Written date is for drafts and pre-publication work.</p>
+        <label>Where published<input placeholder="Farmapper, Maisa Space, Medium…" maxLength={120} value={work.venue||""} onChange={e=>change("venue",e.target.value)}/></label>
+        <label>Venue / source URL<input type="url" placeholder="https://…" maxLength={2000} value={work.venueUrl||""} onChange={e=>change("venueUrl",e.target.value)}/></label>
         <label>Collection<input placeholder="An optional shelf name" value={work.collection} maxLength={80} onChange={e=>change("collection",e.target.value)}/></label>
         <fieldset><legend>Book cover</legend><div className="swatches">{["forest","clay","linen","night"].map(t=><button key={t} className={"swatch "+t+(t===work.theme?" chosen":"")} aria-label={t+" cover"} aria-pressed={t===work.theme} onClick={()=>change("theme",t)}>{t===work.theme?<Check size={18}/>:null}</button>)}</div></fieldset>
         <p className="setting-note">Use a page break where a poem or chapter should turn. Long pages scroll, so nothing is cut off.</p>
         <LayoutControls value={work.layout} onChange={v=>change("layout",v)}/>
         <Button icon={Bookmark} disabled={busy} onClick={()=>{setVersionName("");setModal("name-version");}}>Save named version</Button>
         {work.versionName&&<p className="setting-note">Current saved edition: <strong>{work.versionName}</strong></p>}
-        <div className="settings-divider"/><span className="privacy-label"><Lock size={15}/>Private draft</span><p className="setting-note">No automatic publishing. No AI detectors. No rewriting your words.</p>
+        <div className="settings-divider"/><span className="privacy-label"><Lock size={15}/>{work.draftOf?"Archived draft":"Private draft"}</span><p className="setting-note">{work.draftOf?"Linked under a primary piece — off the main shelf and bibliography.":"No automatic publishing. No AI detectors. No rewriting your words."}</p>
+        {work.draftOf&&<div className="source-card"><small>DRAFT OF</small><p>{works.find(w=>w.id===work.draftOf)?.title||"Primary writing"}{work.draftNote?` — ${work.draftNote}`:""}</p><button type="button" onClick={()=>edit(work.draftOf)}>Open primary <ExternalLink size={14}/></button><button type="button" onClick={()=>unlinkDraft(true)}>Restore to library</button></div>}
+        {work.id&&!work.draftOf&&<>
+          <div className="settings-divider"/><span className="privacy-label"><Archive size={15}/>Archived drafts</span>
+          <p className="fineprint">Keep Google Docs roughs and earlier cuts under this published piece — not on the main shelf.</p>
+          {linkedDrafts.length?<ul className="draft-list">{linkedDrafts.map(d=><li key={d.id}><button type="button" className="text-button" onClick={()=>edit(d.id)}>{d.title}</button><small>{d.draftNote||"Draft"}{d.writtenAt?` · ${dateLabel(d.writtenAt)}`:""}</small></li>)}</ul>:<p className="fineprint">No archived drafts yet.</p>}
+          <Button icon={Archive} disabled={busy} onClick={()=>{setDraftNoteInput("Earlier draft");setDraftWrittenAt(dateInputValue(work.writtenAt||work.publishedAt)||"");setModal("archive-draft");}}>Archive current text as draft</Button>
+          <Button disabled={busy} onClick={()=>{setDraftPrimaryId("");setDraftNoteInput("");setDraftWrittenAt(dateInputValue(work.writtenAt)||"");setModal("link-draft");}}>Link this piece as a draft of…</Button>
+        </>}
         {work.id&&<><Button icon={Link2} disabled={busy} onClick={share}>{work.shareToken?"Manage snapshot":"Share snapshot"}</Button><Button icon={Download} disabled={busy||dirty} onClick={()=>exportWorks([work.id])}>Export writing</Button><Button icon={History} onClick={showHistory}>Saved versions</Button><Button icon={Archive} onClick={toggleArchive}>{work.archived?"Restore to library":"Archive writing"}</Button></>}
         {work.source&&<div className="source-card"><small>IMPORTED FROM {work.source.platform.toUpperCase()}</small><p>Your imported original is kept separately from your edits.</p><button onClick={()=>setModal("original")}>View original source <ExternalLink size={14}/></button>{work.source.platform==="Google Docs text copy"&&<button onClick={()=>{if(!abandon())return;setShareUrl(work.source.url);setModal("import");}}>Review a newer Google draft <RefreshCw size={14}/></button>}</div>}
       </aside></div>
     </main>}
   </div>}
   {toast&&<div className="toast" role="status"><Check size={18}/>{toast}</div>}
-  {modal==="import"&&<ImportModal initialName={work?.title||""} initialUrl={shareUrl.startsWith("https:")&&!shareUrl.includes("#share=")?shareUrl:""} onClose={()=>{setModal("");setShareUrl("");}} onDone={async message=>{setModal("");setShareUrl("");await refresh();setWork(null);setSaved("");setView("library");setFilter("all");notice(message);}}/>}
+  {modal==="import"&&<ImportModal initialName={work?.title||""} initialUrl={shareUrl.startsWith("https:")&&!shareUrl.includes("#share=")?shareUrl:""} onClose={()=>{setModal("");setShareUrl("");}} onDone={async message=>{setModal("");setShareUrl("");await refresh({backfillBiblio:true});setWork(null);setSaved("");setView("library");setFilter("all");notice(message);}}/>}
+  {modal==="archive-draft"&&<Modal title="Archive current text as a draft" onClose={()=>{if(!busy)setModal("");}}><form className="modal-body" onSubmit={e=>{e.preventDefault();archiveCurrentAsDraft();}}>{error&&<p className="form-error" role="alert">{error}</p>}<p>Copies this piece’s current text into an archived draft under it. The primary stays on your shelf and bibliography; the draft does not.</p><label>Note<input maxLength={240} placeholder="Google Docs rough before trim" value={draftNoteInput} onChange={e=>setDraftNoteInput(e.target.value)}/></label><label>Draft date<input type="date" value={draftWrittenAt} onChange={e=>setDraftWrittenAt(e.target.value)}/></label><div className="modal-actions"><Button disabled={busy} variant="primary">Archive draft</Button></div></form></Modal>}
+  {modal==="link-draft"&&<Modal title="Link as archived draft of…" onClose={()=>{if(!busy)setModal("");}}><form className="modal-body" onSubmit={e=>{e.preventDefault();linkAsDraft();}}>{error&&<p className="form-error" role="alert">{error}</p>}<p>Use this for a Google Docs paste or rough that later became a published post. This piece leaves the main shelf and bibliography.</p><label>Primary writing<select required value={draftPrimaryId} onChange={e=>setDraftPrimaryId(e.target.value)}><option value="">Choose…</option>{works.filter(w=>!w.archived&&!w.isDraft&&w.id!==work?.id).map(w=><option key={w.id} value={w.id}>{w.title}</option>)}</select></label><label>Note<input maxLength={240} placeholder="Rough draft from Docs" value={draftNoteInput} onChange={e=>setDraftNoteInput(e.target.value)}/></label><label>Draft date<input type="date" value={draftWrittenAt} onChange={e=>setDraftWrittenAt(e.target.value)}/></label><div className="modal-actions"><Button disabled={busy||!draftPrimaryId} variant="primary">Link as draft</Button></div></form></Modal>}
   {modal==="about"&&<Modal title="The Writes promise" onClose={()=>setModal("")}><div className="modal-body prose"><p>Your writing can begin anywhere. It should not have to stay there.</p><ul><li><strong>A copy you control.</strong> Imports become independent text copies. Their originals remain attached.</li><li><strong>Your voice, untouched.</strong> Plain-text editing preserves line breaks, indentation, and stanza spacing.</li><li><strong>An open door.</strong> Export TXT, Markdown, readable HTML, JSON, and saved revisions in a ZIP.</li><li><strong>You decide what leaves.</strong> Drafts stay private. Sharing creates a separate snapshot; later edits do not silently publish.</li></ul><p>Feed images are kept as HTTPS links so they can display in the reader. Binary image storage in Writes, illustration tools, and AI assistance are later additions.</p><p className="fineprint">{cfg.mode==="production"?"Your private library is stored in the Social Desk Club AWS account. Export anything important so you always keep a copy you control.":"The preview uses temporary development hosting, not your live AWS library. Export anything important before relying on it."}</p></div></Modal>}
   {modal==="arrange"&&<Modal title="Give your verses room" wide onClose={()=>{if(!busy)setModal("");}}>{error&&<p className="form-error" role="alert">{error}</p>}<VerseArranger body={work.body} busy={busy} onCancel={()=>setModal("")} onApply={body=>{change("body",body);setModal("");notice("Arrangement applied to your draft. Save when you are ready.");}} onAlternate={alternate}/></Modal>}
   {modal==="name-version"&&<Modal title="Keep a named version" onClose={()=>{if(!busy)setModal("");}}><form className="modal-body" onSubmit={async e=>{e.preventDefault();if(await save(versionName.trim()))setModal("");}}>{error&&<p className="form-error" role="alert">{error}</p>}<p>Save the current text and book layout as an edition you can find again. Later changes will not replace this saved version.</p><label>Version name<input autoFocus required maxLength={80} placeholder="Reading-night version" value={versionName} onChange={e=>setVersionName(e.target.value)}/></label><div className="modal-actions"><Button disabled={busy||!versionName.trim()} variant="primary">Save this version</Button></div></form></Modal>}
@@ -387,7 +449,7 @@ function PublicBibliography({bib,onClose}){
     {(bib.sections||[]).map(section=>(
       <section className="bib-section" key={section.id}>
         <div className="section-label"><h2>{section.label}</h2><span>{(section.entries||[]).length}</span></div>
-        {(section.entries||[]).length?<ul className="bib-list">{section.entries.map((e,i)=><li key={i}><div><strong>{e.title}</strong><small>{e.author||""}{e.publishedAt?` · ${yearLabel(e.publishedAt)||dateLabel(e.publishedAt)}`:""}{e.sourceUrl?<> · <a href={e.sourceUrl} target="_blank" rel="noreferrer">Source</a></>:null}</small></div></li>)}</ul>:<p className="fineprint">No entries.</p>}
+        {(section.entries||[]).length?<ul className="bib-list">{section.entries.map((e,i)=><li key={i}><div><strong>{e.title}</strong><small>{e.author||""}{e.venue?` · ${e.venue}`:""}{e.publishedAt?` · ${dateLabel(e.publishedAt)}`:e.writtenAt?` · written ${dateLabel(e.writtenAt)}`:""}{(e.venueUrl||e.sourceUrl)?<> · <a href={e.venueUrl||e.sourceUrl} target="_blank" rel="noreferrer">Link</a></>:null}</small></div></li>)}</ul>:<p className="fineprint">No entries.</p>}
       </section>
     ))}
   </main>;

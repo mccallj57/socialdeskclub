@@ -3,7 +3,7 @@ import { z } from "zod";
 import { fail, hash, resolveFeedUrls, safeFetch, parseFeed, parseFile, parseZip, googleDraft, collectAuthorAliases, gateCandidatesByAuthor, workImportId, normalizeCanonicalUrl, enrichSubstackAuthors, publicationHomeFromUrls } from "./imports.mjs";
 import { DEFAULT_LAYOUT } from "../shared/poetry.mjs";
 import { coverFromWork, firstImageUrl } from "../shared/manuscript.mjs";
-import { defaultCategories, normalizeCategories, inferCategoryId, categoryIdFromKind, labelForCategory } from "../shared/bibliography.mjs";
+import { defaultCategories, normalizeCategories, inferCategoryId, categoryIdFromKind, labelForCategory, inferVenue, resolveBiblioFields, normalizeDateField, bibliographySort } from "../shared/bibliography.mjs";
 
 const CATEGORY_IDS = defaultCategories().map(c => c.id);
 const input = z.object({
@@ -17,6 +17,12 @@ const input = z.object({
   coverUrl: z.string().max(2000).default(""),
   archived: z.boolean().default(false),
   versionName: z.string().trim().max(80).default(""),
+  publishedAt: z.string().max(40).default(""),
+  writtenAt: z.string().max(40).default(""),
+  venue: z.string().max(120).default(""),
+  venueUrl: z.string().max(2000).default(""),
+  draftOf: z.string().max(80).default(""),
+  draftNote: z.string().max(240).default(""),
   layout: z.object({
     lineHeight:z.number().min(1.2).max(2.4).default(1.9),
     stanzaGap:z.enum(["original","compact","airy"]).default("original"),
@@ -30,17 +36,27 @@ const resolveCategoryId = (w, fields = {}) => {
   if (raw && CATEGORY_IDS.includes(raw)) return raw;
   return categoryIdFromKind(fields.kind || w?.kind || "essay");
 };
-const metadata = w => ({
-  id:w.id, title:w.title, author:w.author, kind:w.kind, categoryId: resolveCategoryId(w),
-  collection:w.collection, theme:w.theme,
-  coverUrl: coverFromWork(w),
-  archived:w.archived, version:w.version, updatedAt:w.updatedAt, example:w.example, shared:!!w.shareToken,
-  platform:w.source?.platform, words:w.body.trim().split(/\s+/).filter(Boolean).length,
-  sourceUrl: w.source?.url || "",
-  publishedAt: w.source?.publishedAt || "",
-});
+const metadata = w => {
+  const bib = resolveBiblioFields(w);
+  return {
+    id:w.id, title:w.title, author:w.author, kind:w.kind, categoryId: resolveCategoryId(w),
+    collection:w.collection, theme:w.theme,
+    coverUrl: coverFromWork(w),
+    archived:w.archived, version:w.version, updatedAt:w.updatedAt, example:w.example, shared:!!w.shareToken,
+    platform:w.source?.platform, words:w.body.trim().split(/\s+/).filter(Boolean).length,
+    sourceUrl: w.source?.url || bib.venueUrl || "",
+    publishedAt: bib.publishedAt,
+    writtenAt: bib.writtenAt,
+    venue: bib.venue,
+    venueUrl: bib.venueUrl,
+    draftOf: w.draftOf || "",
+    draftNote: w.draftNote || "",
+    isDraft: !!w.draftOf,
+  };
+};
 const publicCopy = w => ({ id:w.id,title:w.title,author:w.author,kind:w.kind,categoryId:resolveCategoryId(w),body:w.body,theme:w.theme,collection:w.collection,layout:w.layout,coverUrl:coverFromWork(w),version:w.version,publishedAt:now() });
 const exportCopy = w => { const {shareToken,...copy} = w; return copy; };
+const isPrimaryShelfWork = w => !w.archived && !w.draftOf;
 export const EXAMPLES = [
   { title:"The space between",kind:"poetry",categoryId:"poetry",theme:"forest",collection:"Small observations",author:"A Writes example",body:"Not every silence\nis an empty room.\n\nSome are a window\nleft open\n    for the rain.\n\n[[page]]\n\nI am learning\nto leave a little space\nbetween the things I know.\n\nEnough for a seed.\nEnough for a question.\nEnough for you.",example:true },
   { title:"A small atlas\nof home",kind:"story",categoryId:"story",theme:"clay",collection:"Small observations",author:"A Writes example",body:"The map her grandfather left behind had no roads.\n\nInstead, there were the places where things had happened: a first snow, a lost dog found, a very good sandwich.\n\nIn the corner, beneath a tiny drawing of the kitchen, he had written: Start here.\n\n[[page]]\n\nShe spread it on the table and took out a pencil.\n\nThe house had changed. The apple tree was gone. But the afternoon light still found the same patch of floor.\n\nShe drew a small square and wrote: Where I began again.",example:true },
@@ -77,7 +93,26 @@ export class Writes {
       || old?.coverUrl
       || "";
     const categoryId = resolveCategoryId(old, { ...validated, ...extra });
-    const w = { ...old, ...validated, ...extra, coverUrl, categoryId, id:old?.id || extra.id || crypto.randomUUID(),createdAt:old?.createdAt || stamp,updatedAt:stamp,version:(old?.version||0)+1 };
+    const merged = { ...old, ...validated, ...extra, coverUrl, categoryId };
+    const bib = resolveBiblioFields(merged);
+    const draftOf = String(extra.draftOf ?? validated.draftOf ?? old?.draftOf ?? "").trim();
+    const draftNote = String(extra.draftNote ?? validated.draftNote ?? old?.draftNote ?? "").trim().slice(0, 240);
+    // Draft siblings stay off the main shelf (archived) unless explicitly unlinked.
+    const archived = draftOf ? true : validated.archived;
+    const w = {
+      ...merged,
+      publishedAt: normalizeDateField(validated.publishedAt || bib.publishedAt) || bib.publishedAt,
+      writtenAt: normalizeDateField(validated.writtenAt || bib.writtenAt) || bib.writtenAt,
+      venue: String(validated.venue || bib.venue || "").trim().slice(0, 120),
+      venueUrl: String(validated.venueUrl || bib.venueUrl || "").trim().slice(0, 2000),
+      draftOf,
+      draftNote,
+      archived,
+      id: old?.id || extra.id || crypto.randomUUID(),
+      createdAt: old?.createdAt || stamp,
+      updatedAt: stamp,
+      version: (old?.version || 0) + 1,
+    };
     if (Buffer.byteLength(JSON.stringify(w)) > 300000) fail("This piece and its source are too large to save together. Import a smaller plain-text section.");
     const ops = [{pk:owner,sk:"work#"+w.id,value:w,expected:old?.version||0}];
     if (old) ops.push({pk:owner,sk:`revision#${old.id}#${String(old.version).padStart(8,"0")}`,value:exportCopy(old),expected:0});
@@ -125,7 +160,7 @@ export class Writes {
     if (method === "GET" && path === "/api/works") return {works:(await this.store.list(owner,"work#")).map(metadata)};
     if (method === "GET" && path === "/api/bibliography") {
       const settings = await this.bibliographySettings(owner);
-      const works = (await this.store.list(owner,"work#")).filter(w => !w.archived);
+      const works = (await this.store.list(owner,"work#")).filter(isPrimaryShelfWork);
       const entries = works.map(w => {
         const meta = metadata(w);
         return {
@@ -136,11 +171,14 @@ export class Writes {
           categoryLabel: labelForCategory(settings.categories, meta.categoryId),
           updatedAt: meta.updatedAt,
           publishedAt: meta.publishedAt,
-          sourceUrl: meta.sourceUrl,
+          writtenAt: meta.writtenAt,
+          venue: meta.venue,
+          venueUrl: meta.venueUrl,
+          sourceUrl: meta.sourceUrl || meta.venueUrl,
           kind: meta.kind,
           words: meta.words,
         };
-      }).sort((a,b) => a.title.localeCompare(b.title));
+      }).sort(bibliographySort);
       const sections = settings.categories.map(cat => ({
         ...cat,
         entries: entries.filter(e => e.categoryId === cat.id),
@@ -165,7 +203,16 @@ export class Writes {
         categories: listing.categories,
         sections: listing.sections.map(s => ({
           id: s.id, label: s.label, hint: s.hint,
-          entries: s.entries.map(e => ({ title: e.title, author: e.author, sourceUrl: e.sourceUrl, publishedAt: e.publishedAt })),
+          entries: s.entries.map(e => ({
+            title: e.title,
+            author: e.author,
+            sourceUrl: e.sourceUrl || e.venueUrl,
+            publishedAt: e.publishedAt,
+            writtenAt: e.writtenAt,
+            venue: e.venue,
+            venueUrl: e.venueUrl,
+            categoryLabel: e.categoryLabel,
+          })),
         })),
         publishedAt: now(),
       };
@@ -201,9 +248,113 @@ export class Writes {
       }
       return { updated, already, missing, total: works.length };
     }
+    if (method === "POST" && path === "/api/works/backfill-biblio") {
+      const works = await this.store.list(owner, "work#");
+      let updated = 0, already = 0;
+      for (const work of works) {
+        const bib = resolveBiblioFields(work);
+        const nextPub = work.publishedAt || bib.publishedAt;
+        const nextVenue = work.venue || bib.venue;
+        const nextVenueUrl = work.venueUrl || bib.venueUrl;
+        const nextWritten = work.writtenAt || bib.writtenAt;
+        if (
+          String(work.publishedAt || "") === nextPub
+          && String(work.venue || "") === nextVenue
+          && String(work.venueUrl || "") === nextVenueUrl
+          && String(work.writtenAt || "") === nextWritten
+        ) { already += 1; continue; }
+        if (!nextPub && !nextVenue && !nextVenueUrl && !nextWritten) { already += 1; continue; }
+        const stamp = now();
+        const saved = {
+          ...work,
+          publishedAt: nextPub,
+          writtenAt: nextWritten,
+          venue: nextVenue,
+          venueUrl: nextVenueUrl,
+          updatedAt: stamp,
+          version: (work.version || 0) + 1,
+        };
+        await this.store.commit([{ pk: owner, sk: "work#" + work.id, value: saved, expected: work.version || 0 }]);
+        updated += 1;
+      }
+      return { updated, already, total: works.length };
+    }
     if (method === "POST" && path === "/api/works") {
       if ((await this.store.list(owner,"work#")).length >= 500) fail("This workspace is limited to 500 writings in this first release.");
       return {work:await this.save(owner,data)};
+    }
+    const draftMatch = path.match(/^\/api\/works\/([a-zA-Z0-9-]+)\/(drafts|link-draft|archive-as-draft|unlink-draft)$/);
+    if (draftMatch) {
+      const [, id, action] = draftMatch;
+      const old = await this.required(owner, id);
+      if (action === "drafts" && method === "GET") {
+        const drafts = (await this.store.list(owner, "work#"))
+          .filter(w => w.draftOf === id)
+          .sort((a, b) => String(b.writtenAt || b.updatedAt).localeCompare(String(a.writtenAt || a.updatedAt)))
+          .map(metadata);
+        return { drafts, primary: metadata(old) };
+      }
+      if (action === "link-draft" && method === "POST") {
+        const primaryId = String(data.primaryId || "").trim();
+        if (!primaryId || primaryId === id) fail("Choose a different primary piece to attach this draft under.");
+        const primary = await this.required(owner, primaryId);
+        if (primary.draftOf) fail("That piece is already an archived draft. Choose a primary writing instead.");
+        const note = String(data.note || data.draftNote || "").trim().slice(0, 240);
+        const writtenAt = normalizeDateField(data.writtenAt) || old.writtenAt || "";
+        const work = await this.save(owner, {
+          ...old,
+          draftOf: primaryId,
+          draftNote: note,
+          writtenAt,
+          archived: true,
+          version: old.version,
+        }, old, { draftOf: primaryId, draftNote: note });
+        return { work, primary: metadata(primary) };
+      }
+      if (action === "archive-as-draft" && method === "POST") {
+        // Snapshot current text as a new archived draft sibling under this primary.
+        if (old.draftOf) fail("This piece is already an archived draft.");
+        if ((await this.store.list(owner, "work#")).length >= 500) fail("This workspace is limited to 500 writings.");
+        const note = String(data.note || data.draftNote || "Earlier draft").trim().slice(0, 240) || "Earlier draft";
+        const writtenAt = normalizeDateField(data.writtenAt) || normalizeDateField(old.writtenAt) || now().slice(0, 10);
+        const draft = await this.save(owner, {
+          title: (old.title + " · draft").slice(0, 180),
+          author: old.author,
+          body: old.body,
+          kind: old.kind,
+          categoryId: old.categoryId,
+          collection: old.collection,
+          theme: old.theme,
+          coverUrl: old.coverUrl || "",
+          layout: old.layout,
+          versionName: "",
+          publishedAt: "",
+          writtenAt,
+          venue: old.venue || "",
+          venueUrl: old.venueUrl || "",
+          archived: true,
+          draftOf: old.id,
+          draftNote: note,
+        }, null, {
+          draftOf: old.id,
+          draftNote: note,
+          source: old.source ? { ...old.source, key: (old.source.key || "draft") + "|draft|" + crypto.randomUUID() } : undefined,
+          derivedFrom: { id: old.id, version: old.version, title: old.title },
+        });
+        return { draft, work: old };
+      }
+      if (action === "unlink-draft" && method === "POST") {
+        if (!old.draftOf) fail("This writing is not linked as a draft.");
+        const restore = data.restore === true;
+        const work = await this.save(owner, {
+          ...old,
+          draftOf: "",
+          draftNote: "",
+          archived: restore ? false : true,
+          version: old.version,
+        }, old, { draftOf: "", draftNote: "" });
+        return { work };
+      }
     }
     const revisionMatch = path.match(/^\/api\/works\/([a-zA-Z0-9-]+)\/revisions\/([0-9]+)$/);
     if (revisionMatch && method === "GET") {
@@ -394,12 +545,21 @@ export class Writes {
         if ((old?.version||0) !== c.existingVersion) { results.push({title:c.title,status:"conflict"}); continue; }
         if (old && !(data.approvedChanges||[]).includes(index)) { results.push({title:c.title,status:"needs-review"}); continue; }
         try {
+          const inferred = inferVenue({
+            platform: c.source?.platform,
+            url: c.source?.url,
+            collection: c.collection,
+          });
+          const publishedAt = old?.publishedAt || normalizeDateField(c.source?.publishedAt) || "";
           await this.save(owner,{
             ...c,
-            ...(old?{kind:old.kind,collection:old.collection,theme:old.theme,layout:old.layout,archived:old.archived,categoryId:old.categoryId}:{archived:false}),
+            ...(old?{kind:old.kind,collection:old.collection,theme:old.theme,layout:old.layout,archived:old.archived,categoryId:old.categoryId,writtenAt:old.writtenAt,draftOf:old.draftOf,draftNote:old.draftNote}:{archived:false}),
             versionName:"",
             coverUrl:c.coverUrl||old?.coverUrl||"",
             categoryId: old?.categoryId || inferCategoryId({ kind: c.kind, title: c.title, platform: c.source?.platform, collection: c.collection }),
+            publishedAt,
+            venue: old?.venue || inferred.venue,
+            venueUrl: old?.venueUrl || inferred.venueUrl || c.source?.url || "",
           },old,{id:c.id,source:c.source,example:false,coverUrl:c.coverUrl||old?.coverUrl||""});
           results.push({title:c.title,status:old?"updated":"imported"});
         } catch(e) { if(e.status===409) results.push({title:c.title,status:"conflict"}); else throw e; }
