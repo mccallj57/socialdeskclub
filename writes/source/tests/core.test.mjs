@@ -163,6 +163,29 @@ test("Substack ZIP with blank authors skips under author-only unless sole-author
   assert.equal(sole.candidates.filter(c=>c.status==="new").length,2);
   assert.equal(sole.candidates.every(c=>c.authorGate!=="block"),true);
 });
+test("ZIP auto-detects publication from email_list and enriches without pasted homepage",async()=>{
+  const html="<p>Hi</p>";
+  const csv="post_id,post_date,is_published,type,title,subtitle,audience\n1.giving-tree,2023-01-01T00:00:00.000Z,true,newsletter,Giving Tree,,everyone\n2.empty-locker-decorated-halls,2023-02-01T00:00:00.000Z,true,newsletter,Empty Locker,,everyone\n";
+  const zip=new JSZip();
+  zip.file("posts.csv",csv);
+  zip.file("email_list.maisaspace.csv","email\na@b.com\n");
+  zip.file("posts/1.giving-tree.html",html);
+  zip.file("posts/2.empty-locker-decorated-halls.html",html);
+  const base64=await zip.generateAsync({type:"base64"});
+  const fromZip=await parseZip(base64,{substack:true});
+  assert.match(fromZip[0].source.url,/maisaspace\.substack\.com\/p\/giving-tree/);
+  const feedXml=`<rss><channel><generator>Substack</generator>
+    <item><guid>g1</guid><title>Giving Tree</title><link>https://blog.maisaspace.org/p/giving-tree</link><dc:creator><![CDATA[James McCall]]></dc:creator><content:encoded><![CDATA[<p>x</p>]]></content:encoded></item>
+    <item><guid>g2</guid><title>Empty</title><link>https://blog.maisaspace.org/p/empty-locker-decorated-halls</link><dc:creator><![CDATA[Samia]]></dc:creator><content:encoded><![CDATA[<p>y</p>]]></content:encoded></item>
+  </channel></rss>`;
+  const store=new (await import("../server/storage.mjs")).SQLiteStore(":memory:");
+  const app=new Writes(store,async()=>({url:"https://maisaspace.substack.com/feed",text:feedXml}));
+  const job=await app.route("member#james","POST","/api/import/preview",{name:"export.zip",base64},{display_name:"James McCall",username:"james"});
+  assert.match(job.warning,/Looked up/i);
+  assert.equal(job.candidates.filter(c=>c.status!=="excluded").length,1);
+  assert.equal(job.candidates.filter(c=>c.status==="excluded").length,1);
+  assert.equal(job.candidates.find(c=>c.status!=="excluded").author,"James McCall");
+});
 test("ZIP author enrichment from Substack RSS/API enables author-only filter",async()=>{
   const {enrichSubstackAuthors}=await import("../server/imports.mjs");
   const candidates=[

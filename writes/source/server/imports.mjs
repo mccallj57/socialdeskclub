@@ -347,10 +347,23 @@ function authorFromPostHtml(text) {
  * Requires a publication homepage so we can build /p/{slug} and API URLs.
  * No LLM / Grok — public HTTPS lookups only.
  */
-export async function enrichSubstackAuthors(candidates, { publicationUrl = "", feedFetch = safeFetch, get = safeGet, maxLookups = 80 } = {}) {
-  const base = normalizeCanonicalUrl(publicationUrl) || String(publicationUrl || "").replace(/\/+$/, "");
+export async function enrichSubstackAuthors(candidates, { publicationUrl = "", feedFetch = safeFetch, get = safeGet, maxLookups = 200 } = {}) {
+  const base = normalizeCanonicalUrl(publicationUrl)
+    || publicationHomeFromUrls(candidates)
+    || String(publicationUrl || "").replace(/\/+$/, "");
   if (!base || !candidates?.length) {
-    return { candidates, fromFeed: 0, fromApi: 0, fromHtml: 0, failed: 0, skipped: candidates?.length || 0, note: "" };
+    return {
+      candidates,
+      fromFeed: 0,
+      fromApi: 0,
+      fromHtml: 0,
+      failed: 0,
+      skipped: candidates?.length || 0,
+      publicationUrl: "",
+      note: candidates?.length
+        ? "No publication homepage — cannot look up Substack authors. Paste https://yourpub.substack.com or the custom domain, then Preview again. "
+        : "",
+    };
   }
   let root;
   try { root = new URL(base); } catch {
@@ -425,8 +438,8 @@ export async function enrichSubstackAuthors(candidates, { publicationUrl = "", f
   const filled = fromFeed + fromApi + fromHtml;
   const note = filled
     ? `Looked up ${filled} author${filled === 1 ? "" : "s"} from Substack (RSS${fromFeed ? ` ${fromFeed}` : ""}${fromApi ? `, API ${fromApi}` : ""}${fromHtml ? `, HTML ${fromHtml}` : ""}). `
-    : (publicationUrl ? "Could not look up Substack authors for this export (check the publication homepage). " : "");
-  return { candidates: out, fromFeed, fromApi, fromHtml, failed, skipped: 0, note };
+    : `Could not look up Substack authors from ${base} (RSS/API failed). Check the publication homepage. `;
+  return { candidates: out, fromFeed, fromApi, fromHtml, failed, skipped: 0, publicationUrl: base, note };
 }
 const BLOCK = new Set(["P","DIV","SECTION","ARTICLE","H1","H2","H3","H4","BLOCKQUOTE","LI","UL","OL","FIGURE","FIGCAPTION"]);
 /** Keep HTTPS feed images as markdown markers; skip trackers / non-public schemes. */
@@ -591,6 +604,28 @@ export function parseCsv(text) {
     return obj;
   });
 }
+export function publicationHomeFromUrls(candidates = []) {
+  for (const c of candidates) {
+    try {
+      const url = new URL(c.source?.url || c.url || "");
+      if (url.protocol !== "https:" && url.protocol !== "http:") continue;
+      if (!/\/p\//.test(url.pathname)) continue;
+      url.pathname = "/";
+      url.search = "";
+      url.hash = "";
+      return normalizeCanonicalUrl(url.toString()) || url.origin;
+    } catch { /* next */ }
+  }
+  return "";
+}
+/** Substack exports often include email_list.{subdomain}.csv — enough to build https://{sub}.substack.com */
+export function detectPublicationFromExportFiles(files = []) {
+  for (const file of files) {
+    const match = String(file.name || "").match(/(?:^|\/)email_list\.([A-Za-z0-9_-]+)\.csv$/i);
+    if (match) return `https://${match[1]}.substack.com`;
+  }
+  return "";
+}
 export function publicationPostUrl(base, postId) {
   const root = normalizeCanonicalUrl(base) || String(base || "").replace(/\/+$/, "");
   if (!root) return "";
@@ -662,7 +697,11 @@ export async function parseZip(base64, options = {}) {
       if (!/\.(html?|txt|md|json|csv)$/i.test(entry.fileName) || /(^|\/)(__MACOSX|revisions|originals)\//.test(entry.fileName)) return zip.readEntry();
       // Skip huge email open/deliver CSVs in Substack exports
       if (/(^|\/)posts\/.*\.(opens|delivers)\.csv$/i.test(entry.fileName)) return zip.readEntry();
-      if (/email_list|subscribers/i.test(entry.fileName) && /\.csv$/i.test(entry.fileName)) return zip.readEntry();
+      // Keep email_list.{subdomain}.csv name for publication auto-detect; skip body (PII, large).
+      if (/email_list|subscribers/i.test(entry.fileName) && /\.csv$/i.test(entry.fileName)) {
+        files.push({ name: entry.fileName, text: "" });
+        return zip.readEntry();
+      }
       zip.openReadStream(entry, (err, stream) => {
         if (err) return stop(err);
         const chunks = []; let size = 0;
@@ -676,8 +715,9 @@ export async function parseZip(base64, options = {}) {
   const backup = files.find(f => /(^|\/)writes-library\.json$/i.test(f.name));
   if (backup) return parseFile(backup.name, backup.text);
   if (files.some(f => /(^|\/)posts\.csv$/i.test(f.name))) {
+    const publicationUrl = options.publicationUrl || detectPublicationFromExportFiles(files) || "";
     return parseSubstackExport(files, {
-      publicationUrl: options.publicationUrl || "",
+      publicationUrl,
       defaultAuthor: options.defaultAuthor || "",
     });
   }
