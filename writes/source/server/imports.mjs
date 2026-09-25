@@ -128,24 +128,83 @@ export function collectAuthorAliases(actor = {}, resolved = {}, owner = "", extr
   }
   return aliases;
 }
+/**
+ * True only for a real byline match.
+ * - Exact normalized equality
+ * - Multi-word alias appears as a phrase in the byline
+ * - Single-token alias (len ≥ 4) equals a whole token of the byline (so "james" matches "James McCall", not "Samia")
+ * Empty bylines never match.
+ */
 export function authorMatches(itemAuthor, aliases) {
-  if (!aliases?.length) return true;
+  if (!aliases?.length) return false;
   const author = normalizeAuthor(itemAuthor);
   if (!author) return false;
   const tokens = author.split(" ").filter(Boolean);
   return aliases.some(alias => {
+    if (!alias) return false;
     if (author === alias) return true;
-    if (tokens.includes(alias)) return true;
-    if (alias.includes(" ") && author.includes(alias)) return true;
-    return false;
+    if (alias.includes(" ")) return author === alias || author.includes(alias);
+    // Single-token alias: require a full token match, ignore tiny stubs.
+    if (alias.length < 4) return false;
+    return tokens.includes(alias);
   });
 }
-export function filterCandidatesByAuthor(candidates, aliases, { authorsOnly = true } = {}) {
-  if (!authorsOnly || !aliases.length) {
-    return { kept: candidates, skipped: 0, aliases, filtered: false };
+/**
+ * Gate each candidate for author-only import.
+ * missing bylines are blocked unless soleAuthor (ZIP with no author column, sole-owned pub).
+ */
+export function gateCandidatesByAuthor(candidates, aliases, { authorsOnly = true, soleAuthor = false, defaultAuthor = "" } = {}) {
+  if (!authorsOnly) {
+    return {
+      candidates: candidates.map(c => ({ ...c, authorGate: "allow" })),
+      kept: candidates.length,
+      skippedOther: 0,
+      skippedMissing: 0,
+      aliases,
+      filtered: false,
+    };
   }
-  const kept = candidates.filter(c => authorMatches(c.author, aliases));
-  return { kept, skipped: candidates.length - kept.length, aliases, filtered: true };
+  if (!aliases.length) {
+    return {
+      candidates: candidates.map(c => ({ ...c, authorGate: "allow" })),
+      kept: candidates.length,
+      skippedOther: 0,
+      skippedMissing: 0,
+      aliases,
+      filtered: false,
+    };
+  }
+  let kept = 0, skippedOther = 0, skippedMissing = 0;
+  const out = candidates.map(c => {
+    const byline = normalizeAuthor(c.author);
+    if (!byline) {
+      if (soleAuthor) {
+        kept += 1;
+        return {
+          ...c,
+          author: c.author || defaultAuthor || aliases[0],
+          authorGate: "allow",
+          authorNote: "no byline — treated as yours (sole-author export)",
+        };
+      }
+      skippedMissing += 1;
+      return { ...c, authorGate: "block", authorNote: "no byline in source" };
+    }
+    if (authorMatches(c.author, aliases)) {
+      kept += 1;
+      return { ...c, authorGate: "allow" };
+    }
+    skippedOther += 1;
+    return { ...c, authorGate: "block", authorNote: `by ${String(c.author).trim()}` };
+  });
+  return { candidates: out, kept, skippedOther, skippedMissing, aliases, filtered: true };
+}
+/** @deprecated use gateCandidatesByAuthor — kept for tests that expect kept/skipped only */
+export function filterCandidatesByAuthor(candidates, aliases, { authorsOnly = true } = {}) {
+  const gated = gateCandidatesByAuthor(candidates, aliases, { authorsOnly, soleAuthor: false });
+  if (!gated.filtered) return { kept: candidates, skipped: 0, aliases, filtered: false };
+  const kept = gated.candidates.filter(c => c.authorGate === "allow");
+  return { kept, skipped: gated.skippedOther + gated.skippedMissing, aliases, filtered: true };
 }
 async function defaultJsonFetch(url) {
   const host = new URL(url).hostname;
@@ -208,6 +267,166 @@ export async function safeFetch(input, redirects = 0) {
     });
     req.on("error", error => { clearTimeout(timer); reject(error); });
   });
+}
+/**
+ * SSRF-safe HTTPS GET for a concrete public URL (no /feed rewrite).
+ * Used to look up Substack post authors when a ZIP omits bylines.
+ */
+export async function safeGet(input, redirects = 0, { accept = "*/*", maxBytes = 2_000_000 } = {}) {
+  let url;
+  try { url = new URL(String(input).trim()); } catch { fail("Invalid lookup address."); }
+  if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443")) fail("Lookups must use public HTTPS without credentials.");
+  if (redirects > 3) fail("The lookup redirected too many times.");
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  const records = ipaddr.isValid(host) ? [{ address: host, family: ipaddr.parse(host).kind() === "ipv4" ? 4 : 6 }] : await dns.lookup(host, { all: true });
+  if (!records.length || records.some(r => !publicAddress(r.address))) fail("That address is not a public internet host.");
+  const record = records[0];
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => req.destroy(new Error("The author lookup took too long.")), 10000);
+    const req = https.get(url, {
+      headers: { "User-Agent": "SocialDeskClub-Writes/0.1 (user-requested Substack author lookup)", Accept: accept, "Accept-Encoding": "identity" },
+      lookup: (_h, opts, cb) => opts?.all ? cb(null, [record]) : cb(null, record.address, record.family),
+    }, response => {
+      if ([301,302,303,307,308].includes(response.statusCode)) {
+        response.resume(); clearTimeout(timer);
+        if (!response.headers.location) return reject(new Error("Empty redirect during author lookup."));
+        safeGet(new URL(response.headers.location, url).toString(), redirects + 1, { accept, maxBytes }).then(resolve, reject);
+        return;
+      }
+      if (response.statusCode !== 200) { response.resume(); clearTimeout(timer); reject(new Error(`Author lookup returned HTTP ${response.statusCode}.`)); return; }
+      const chunks = []; let size = 0;
+      response.on("data", chunk => {
+        size += chunk.length;
+        if (size > maxBytes) req.destroy(new Error("Author lookup response too large."));
+        else chunks.push(chunk);
+      });
+      response.on("end", () => { clearTimeout(timer); resolve({ text: Buffer.concat(chunks).toString("utf8"), url: url.toString() }); });
+      response.on("error", reject);
+    });
+    req.on("error", error => { clearTimeout(timer); reject(error); });
+  });
+}
+export function slugFromPostId(postId) {
+  const raw = String(postId || "").trim();
+  if (!raw) return "";
+  const i = raw.indexOf(".");
+  return i >= 0 ? raw.slice(i + 1) : raw;
+}
+export function slugFromUrl(url) {
+  try {
+    const path = new URL(url).pathname.replace(/\/+$/, "");
+    const m = path.match(/\/p\/([^/]+)$/);
+    return m ? m[1] : "";
+  } catch {
+    return "";
+  }
+}
+function authorFromPostJson(text) {
+  try {
+    const data = JSON.parse(text);
+    const bylines = Array.isArray(data?.publishedBylines) ? data.publishedBylines : [];
+    for (const row of bylines) {
+      const name = String(row?.name || "").trim();
+      if (name) return name;
+      const handle = String(row?.handle || "").trim();
+      if (handle) return handle;
+    }
+  } catch { /* not JSON */ }
+  return "";
+}
+function authorFromPostHtml(text) {
+  const title = String(text || "").match(/<title[^>]*>([^<]*)<\/title>/i);
+  if (title) {
+    const by = title[1].match(/\s+by\s+([^\-|–—]+?)(?:\s*[-|–—]|$)/i);
+    if (by) return by[1].trim();
+  }
+  return "";
+}
+/**
+ * Fill blank ZIP authors from live Substack: publication RSS first, then /api/v1/posts/{slug}.
+ * Requires a publication homepage so we can build /p/{slug} and API URLs.
+ * No LLM / Grok — public HTTPS lookups only.
+ */
+export async function enrichSubstackAuthors(candidates, { publicationUrl = "", feedFetch = safeFetch, get = safeGet, maxLookups = 80 } = {}) {
+  const base = normalizeCanonicalUrl(publicationUrl) || String(publicationUrl || "").replace(/\/+$/, "");
+  if (!base || !candidates?.length) {
+    return { candidates, fromFeed: 0, fromApi: 0, fromHtml: 0, failed: 0, skipped: candidates?.length || 0, note: "" };
+  }
+  let root;
+  try { root = new URL(base); } catch {
+    return { candidates, fromFeed: 0, fromApi: 0, fromHtml: 0, failed: 0, skipped: candidates.length, note: "" };
+  }
+
+  const bySlug = new Map();
+  let fromFeed = 0, fromApi = 0, fromHtml = 0, failed = 0;
+
+  try {
+    const fetched = await feedFetch(base);
+    const items = parseFeed(fetched.text, fetched.url);
+    for (const item of items) {
+      const slug = slugFromUrl(item.source?.url) || slugFromPostId(item.source?.postId);
+      const author = String(item.author || "").trim();
+      if (slug && author) bySlug.set(slug, author);
+    }
+  } catch {
+    // Feed optional — fall through to per-post API.
+  }
+
+  const out = [];
+  let lookups = 0;
+  for (const c of candidates) {
+    if (String(c.author || "").trim()) {
+      out.push(c);
+      continue;
+    }
+    const slug = slugFromUrl(c.source?.url) || slugFromPostId(c.source?.postId);
+    if (!slug) {
+      out.push(c);
+      failed += 1;
+      continue;
+    }
+    if (bySlug.has(slug)) {
+      fromFeed += 1;
+      out.push({ ...c, author: bySlug.get(slug) });
+      continue;
+    }
+    if (lookups >= maxLookups) {
+      out.push(c);
+      failed += 1;
+      continue;
+    }
+    lookups += 1;
+    let author = "";
+    try {
+      const apiUrl = new URL(root);
+      apiUrl.pathname = "/api/v1/posts/" + encodeURIComponent(slug);
+      const res = await get(apiUrl.toString(), 0, { accept: "application/json", maxBytes: 3_000_000 });
+      author = authorFromPostJson(res.text);
+      if (author) fromApi += 1;
+    } catch { /* try HTML */ }
+    if (!author) {
+      try {
+        const pageUrl = new URL(root);
+        pageUrl.pathname = "/p/" + encodeURIComponent(slug);
+        const res = await get(pageUrl.toString(), 0, { accept: "text/html", maxBytes: 1_500_000 });
+        author = authorFromPostHtml(res.text);
+        if (author) fromHtml += 1;
+      } catch { /* leave blank */ }
+    }
+    if (author) {
+      bySlug.set(slug, author);
+      out.push({ ...c, author });
+    } else {
+      failed += 1;
+      out.push(c);
+    }
+  }
+
+  const filled = fromFeed + fromApi + fromHtml;
+  const note = filled
+    ? `Looked up ${filled} author${filled === 1 ? "" : "s"} from Substack (RSS${fromFeed ? ` ${fromFeed}` : ""}${fromApi ? `, API ${fromApi}` : ""}${fromHtml ? `, HTML ${fromHtml}` : ""}). `
+    : (publicationUrl ? "Could not look up Substack authors for this export (check the publication homepage). " : "");
+  return { candidates: out, fromFeed, fromApi, fromHtml, failed, skipped: 0, note };
 }
 const BLOCK = new Set(["P","DIV","SECTION","ARTICLE","H1","H2","H3","H4","BLOCKQUOTE","LI","UL","OL","FIGURE","FIGCAPTION"]);
 /** Keep HTTPS feed images as markdown markers; skip trackers / non-public schemes. */
@@ -407,7 +626,7 @@ export function parseSubstackExport(files, { publicationUrl = "", defaultAuthor 
     const body = htmlText(html);
     if (!body.trim()) continue;
     const url = publicationPostUrl(publicationUrl, postId);
-    const author = String(row.author || row.writer || defaultAuthor || "").trim();
+    const author = String(row.author || row.writer || "").trim();
     out.push(candidate({
       title,
       author,
