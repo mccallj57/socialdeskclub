@@ -353,3 +353,59 @@ test("bibliography groups works by editable category labels",async()=>{
   assert.equal(pub.bibliography.sections.find(s=>s.id==="story").label,"Fiction");
   assert.equal(pub.work,undefined);
 });
+test("bibliography stores dates and venues; drafts stay off the list",async()=>{
+  const {inferVenue,resolveBiblioFields,normalizeDateField}=await import("../shared/bibliography.mjs");
+  assert.equal(inferVenue({url:"https://www.blog.farmapper.com/p/potato",platform:"Substack"}).venue,"Farmapper");
+  assert.equal(inferVenue({url:"https://blog.maisaspace.org/p/x",platform:"Substack export"}).venue,"Maisa Space");
+  assert.equal(normalizeDateField("2023-12-02T00:00:00.000Z"),"2023-12-02");
+  const resolved=resolveBiblioFields({source:{platform:"Substack",url:"https://blog.maisaspace.org/p/coming-soon",publishedAt:"2023-12-02T12:00:00.000Z"}});
+  assert.equal(resolved.venue,"Maisa Space");
+  assert.equal(resolved.publishedAt,"2023-12-02");
+
+  const {app,store}=setup();
+  const primary=await app.route("a","POST","/api/works",{
+    title:"Published piece",body:"final",kind:"essay",author:"James",
+    publishedAt:"2024-06-01",venue:"Maisa Space",venueUrl:"https://blog.maisaspace.org/p/published-piece",
+  });
+  const rough=await app.route("a","POST","/api/works",{
+    title:"Rough Docs paste",body:"longer rough",kind:"essay",author:"James",
+    writtenAt:"2024-05-01",venue:"Google Docs",
+  });
+  const linked=await app.route("a","POST","/api/works/"+rough.work.id+"/link-draft",{
+    primaryId:primary.work.id,note:"Google Docs rough before trim",writtenAt:"2024-05-01",
+  });
+  assert.equal(linked.work.draftOf,primary.work.id);
+  assert.equal(linked.work.archived,true);
+  assert.match(linked.work.draftNote,/Google Docs/i);
+
+  const bib=await app.route("a","GET","/api/bibliography");
+  const essayEntries=bib.sections.find(s=>s.id==="essay").entries;
+  assert.equal(essayEntries.some(e=>e.title==="Published piece"),true);
+  assert.equal(essayEntries.some(e=>e.title==="Rough Docs paste"),false);
+  const entry=essayEntries.find(e=>e.title==="Published piece");
+  assert.equal(entry.venue,"Maisa Space");
+  assert.equal(entry.publishedAt,"2024-06-01");
+
+  const drafts=await app.route("a","GET","/api/works/"+primary.work.id+"/drafts");
+  assert.equal(drafts.drafts.length,1);
+  assert.equal(drafts.drafts[0].id,rough.work.id);
+
+  const snap=await app.route("a","POST","/api/works/"+primary.work.id+"/archive-as-draft",{note:"Pre-trim cut",writtenAt:"2024-05-20"});
+  assert.equal(snap.draft.draftOf,primary.work.id);
+  assert.equal(snap.draft.archived,true);
+  const drafts2=await app.route("a","GET","/api/works/"+primary.work.id+"/drafts");
+  assert.equal(drafts2.drafts.length,2);
+
+  // Import backfill of venue/date
+  const feed=`<rss><channel><generator>Substack</generator>
+    <item><guid>g1</guid><title>Coming soon</title><link>https://blog.maisaspace.org/p/coming-soon</link><pubDate>Sat, 02 Dec 2023 00:00:00 GMT</pubDate><dc:creator><![CDATA[James McCall]]></dc:creator><content:encoded><![CDATA[<p>Hi</p>]]></content:encoded></item>
+  </channel></rss>`;
+  const importer=new Writes(store,async()=>({url:"https://blog.maisaspace.org/feed",text:feed}));
+  const job=await importer.route("member#james","POST","/api/import/preview",{url:"https://blog.maisaspace.org/"},{display_name:"James McCall",username:"james"});
+  await importer.route("member#james","POST","/api/import/commit",{jobId:job.jobId,selected:[0],rights:true},{display_name:"James McCall",username:"james"});
+  const works=(await importer.route("member#james","GET","/api/works")).works;
+  const imported=works.find(w=>/coming soon/i.test(w.title));
+  assert.ok(imported);
+  assert.equal(imported.venue,"Maisa Space");
+  assert.equal(imported.publishedAt,"2023-12-02");
+});
